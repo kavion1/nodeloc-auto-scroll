@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         NodeLoc Auto Scroll & Evidence-Grounded Replier (v21.6.0 - 胶囊全能交互版)
+// @name         NodeLoc Auto Scroll & Evidence-Grounded Replier (v21.7.0 - JSON接口直读版)
 // @namespace    http://tampermonkey.net/
-// @version      21.6.0
-// @description  胶囊支持拖拽、右下角基准缩放、胶囊快捷下一篇与成长看板直达，深度融合 shuorenhua 去AI味引擎。
+// @version      21.7.0
+// @description  成长指标改用官方 upgrade-progress.json 接口直连获取，彻底告别 DOM 模拟与菜单闪烁；支持自主配置账号与自动感知；延续胶囊全能交互与说人话引擎。
 // @author       AutoScroll & shuorenhua
 // @match        https://www.nodeloc.com/*
 // @grant        GM_setValue
@@ -52,7 +52,7 @@
           if (cb) cb();
         };
       } catch (err) {
-        console.warn('[NodeLoc v21.6.0] Worker 初始化失败，降级使用原生计时器:', err);
+        console.warn('[NodeLoc v21.7.0] Worker 初始化失败，降级使用原生计时器:', err);
         worker = null;
       }
       return worker;
@@ -143,6 +143,10 @@
     get pauseOnHidden()     { return STORE.get('nl_pause_on_hidden', true); },
     set pauseOnHidden(v)    { STORE.set('nl_pause_on_hidden', v); },
 
+    // NodeLoc 用户名配置（用于 upgrade-progress.json 直读）
+    get username()          { return STORE.get('nl_username', ''); },
+    set username(v)         { STORE.set('nl_username', (v || '').trim()); },
+
     get apiFormat()         { return STORE.get('nl_api_format', 'openai'); },
     set apiFormat(v)        { STORE.set('nl_api_format', v); },
     get apiUrl()            { return STORE.get('nl_api_url', 'https://modelgate.app'); },
@@ -173,124 +177,170 @@
     count() { return this.getAll().length; }
   };
 
+  // 自动尝试感知当前登录的 NodeLoc 用户名
+  function detectCurrentUsername() {
+    try {
+      if (window.Discourse?.User?.current()?.username) {
+        return window.Discourse.User.current().username;
+      }
+    } catch (e) {}
+
+    const userCardLink = document.querySelector('#current-user a, .current-user a, [data-user-card]');
+    if (userCardLink) {
+      const dataCard = userCardLink.getAttribute('data-user-card');
+      if (dataCard) return dataCard.trim();
+      const href = userCardLink.getAttribute('href') || '';
+      const m = href.match(/\/u\/([^/]+)/);
+      if (m) return m[1].trim();
+    }
+
+    const avatar = document.querySelector('#current-user img.avatar, .current-user img.avatar');
+    if (avatar) {
+      const alt = avatar.getAttribute('alt') || avatar.getAttribute('title');
+      if (alt && !alt.includes('avatar')) return alt.trim();
+    }
+    return '';
+  }
+
   // ============================================================
-  // 成长指标采集模块
+  // 成长指标模块（全新升级：官方 upgrade-progress.json 直读）
   // ============================================================
   const GrowthMetrics = (() => {
     const state = { data: null, updatedAt: null, loading: false, error: '' };
 
     const metricMeta = {
       '阅读时长（分钟）': { key: 'readTime', label: '阅读时长', unit: '分钟', icon: '⏱️' },
+      '阅读时长': { key: 'readTime', label: '阅读时长', unit: '分钟', icon: '⏱️' },
+      'time_read': { key: 'readTime', label: '阅读时长', unit: '分钟', icon: '⏱️' },
+
       '回复话题': { key: 'repliedTopics', label: '回复话题', unit: '个', icon: '💬' },
+      'topic_replied': { key: 'repliedTopics', label: '回复话题', unit: '个', icon: '💬' },
+      'topics_replied_to': { key: 'repliedTopics', label: '回复话题', unit: '个', icon: '💬' },
+
       '进入话题': { key: 'visitedTopics', label: '进入话题', unit: '个', icon: '📖' },
+      'topics_entered': { key: 'visitedTopics', label: '进入话题', unit: '个', icon: '📖' },
+
       '阅读帖子': { key: 'readPosts', label: '阅读帖子', unit: '篇', icon: '👀' },
+      'posts_read': { key: 'readPosts', label: '阅读帖子', unit: '篇', icon: '👀' },
+
       '访问天数': { key: 'activeDays', label: '访问天数', unit: '天', icon: '📅' },
+      'days_visited': { key: 'activeDays', label: '访问天数', unit: '天', icon: '📅' },
+
       '收到的赞': { key: 'receivedLikes', label: '收到的赞', unit: '个', icon: '❤️' },
-      '送出的赞': { key: 'givenLikes', label: '送出的赞', unit: '个', icon: '👍' }
+      'likes_received': { key: 'receivedLikes', label: '收到的赞', unit: '个', icon: '❤️' },
+
+      '送出的赞': { key: 'givenLikes', label: '送出的赞', unit: '个', icon: '👍' },
+      'likes_given': { key: 'givenLikes', label: '送出的赞', unit: '个', icon: '👍' }
     };
 
     function toNumber(value) {
-      const matched = String(value || '').replace(/,/g, '').match(/\d+(?:\.\d+)?/);
+      const matched = String(value ?? '').replace(/,/g, '').match(/\d+(?:\.\d+)?/);
       return matched ? Number(matched[0]) : 0;
     }
 
-    function waitForPanel(timeout = 3500) {
-      return new Promise(resolve => {
-        const startedAt = Date.now();
-        const check = () => {
-          const officialPanel = document.querySelector('.upgrade-progress-panel');
-          const metricCards = officialPanel?.querySelectorAll('.upgrade-progress-panel__card').length || 0;
-          if (officialPanel && metricCards > 0) return resolve(officialPanel);
-          if (Date.now() - startedAt >= timeout) return resolve(null);
-          WorkerTimer.setTimeout(check, 80);
-        };
-        check();
-      });
-    }
+    // 弹性解析官方 upgrade-progress.json 数据
+    function parseUpgradeProgressJson(json) {
+      if (!json || typeof json !== 'object') throw new Error('接口返回格式异常');
 
-    function closeOfficialMenu() {
-      try {
-        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
-        WorkerTimer.setTimeout(() => {
-          const dropDown = document.querySelector('.user-menu, .menu-panel.drop-down');
-          if (dropDown) {
-            const backdrop = document.querySelector('.menu-panel-backdrop') || document.body;
-            backdrop.click();
-          }
-        }, 80);
-      } catch (e) {}
-    }
+      const raw = json.upgrade_progress || json.data || json;
 
-    async function openOfficialPanel() {
-      const existing = document.querySelector('.upgrade-progress-panel');
-      if (existing) return waitForPanel();
-
-      const userMenuButton = document.querySelector('button[aria-label="通知和帐户"]') ||
-                             document.querySelector('#current-user') ||
-                             document.querySelector('.current-user');
-      if (!userMenuButton) throw new Error('未检测到登录账户或菜单按钮');
-      userMenuButton.click();
-
-      const startedAt = Date.now();
-      while (Date.now() - startedAt < 1800) {
-        const upgradeTab = Array.from(document.querySelectorAll('[role="tab"]'))
-          .find(item => item.getAttribute('aria-label') === '升级进度' || item.textContent.trim().includes('升级进度'));
-        if (upgradeTab) {
-          upgradeTab.click();
-          return waitForPanel();
-        }
-        await new Promise(resolve => WorkerTimer.setTimeout(resolve, 80));
+      // 提取等级信息
+      let currentLevel = raw.current_level || raw.currentLevel || raw.current_trust_level || '当前等级';
+      let nextLevel = raw.next_level || raw.nextLevel || raw.target_level || '下一等级';
+      if (Array.isArray(raw.levels) && raw.levels.length >= 2) {
+        currentLevel = raw.levels[0];
+        nextLevel = raw.levels[1];
       }
-      throw new Error('未找到“升级进度”入口');
-    }
 
-    function parseOfficialPanel(officialPanel) {
-      const panelText = officialPanel.innerText.replace(/\s+/g, ' ').trim();
-      const levels = Array.from(officialPanel.querySelectorAll('.upgrade-progress-panel__level'))
-        .map(item => item.textContent.trim());
-      const satisfiedMatch = panelText.match(/(\d+)\s*已满足条件/);
-      const unmetMatch = panelText.match(/(\d+)\s*未满足条件/);
-      const accountMatch = panelText.match(/账号状态\s+(.+?)\s+当前\s+社区活跃度/);
+      // 提取指标项
+      const rawMetrics = Array.isArray(raw.metrics) ? raw.metrics
+        : Array.isArray(raw.requirements) ? raw.requirements
+        : Array.isArray(raw.cards) ? raw.cards
+        : Array.isArray(raw.items) ? raw.items
+        : (raw.requirements && typeof raw.requirements === 'object') ? Object.values(raw.requirements)
+        : [];
 
-      const metrics = Array.from(officialPanel.querySelectorAll('.upgrade-progress-panel__card'))
-        .map(card => {
-          const rawLabel = card.querySelector('.upgrade-progress-panel__card-label')?.textContent.trim() || '';
-          const meta = metricMeta[rawLabel] || { key: 'unknown', label: rawLabel, unit: '', icon: '📌' };
-          const value = toNumber(card.querySelector('.upgrade-progress-panel__card-value')?.textContent);
-          const target = toNumber(card.querySelector('.upgrade-progress-panel__card-target')?.textContent);
-          const progress = Math.min(100, toNumber(card.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')));
-          const reached = card.classList.contains('--met') || (target > 0 && value >= target);
-          return { ...meta, value, target, progress, reached };
-        })
-        .filter(m => m.label);
+      const metrics = rawMetrics.map(item => {
+        const rawLabel = String(item.label || item.name || item.title || item.key || item.id || '').trim();
+        const meta = metricMeta[rawLabel] || metricMeta[item.key] || {
+          key: item.key || rawLabel,
+          label: rawLabel || '未知指标',
+          unit: item.unit || '',
+          icon: '📌'
+        };
 
-      if (metrics.length === 0) throw new Error('未能提取到活跃度卡片');
+        const value = toNumber(item.value ?? item.current ?? item.count);
+        const target = toNumber(item.target ?? item.required ?? item.max);
+        let progress = item.progress !== undefined ? toNumber(item.progress)
+          : (target > 0 ? Math.min(100, Math.round((value / target) * 100)) : 100);
+
+        const reached = Boolean(item.reached ?? item.met ?? item.is_met ?? (target > 0 && value >= target));
+        return { ...meta, value, target, progress, reached };
+      }).filter(m => m.label && m.target > 0);
+
+      // 统计满足情况
+      const satisfiedCount = raw.satisfied_count ?? raw.satisfiedCount ?? raw.met_count
+        ?? metrics.filter(m => m.reached).length;
+      const unmetCount = raw.unmet_count ?? raw.unmetCount ?? raw.unmet
+        ?? (metrics.length > 0 ? metrics.filter(m => !m.reached).length : 0);
+
+      let overallPercent = raw.overall_percent ?? raw.overallPercent ?? raw.percentage ?? raw.gauge_value;
+      if (overallPercent === undefined || overallPercent === null) {
+        overallPercent = metrics.length > 0 ? Math.round((satisfiedCount / metrics.length) * 100) : 0;
+      }
+      overallPercent = Math.min(100, Math.max(0, toNumber(overallPercent)));
+
+      const accountStatus = raw.account_status || raw.accountStatus || raw.status || '未被禁言或封禁';
 
       return {
-        overallPercent: toNumber(officialPanel.querySelector('.upgrade-progress-panel__gauge-value')?.textContent),
-        currentLevel: levels[0] || '当前等级',
-        nextLevel: levels[1] || '下一等级',
-        satisfiedCount: toNumber(satisfiedMatch?.[1]),
-        unmetCount: toNumber(unmetMatch?.[1]),
-        accountStatus: accountMatch?.[1] || '正常活跃',
+        overallPercent,
+        currentLevel,
+        nextLevel,
+        satisfiedCount,
+        unmetCount,
+        accountStatus,
         metrics
       };
     }
 
-    async function refresh() {
+    async function refresh(targetUsername = null) {
       if (state.loading) return state;
+
+      let username = (targetUsername || CFG.username || detectCurrentUsername()).trim();
+      if (!username) {
+        state.error = '请先配置 NodeLoc 用户名';
+        return state;
+      }
+      if (!CFG.username && username) {
+        CFG.username = username;
+      }
+
       state.loading = true;
       state.error = '';
+
       try {
-        const officialPanel = await openOfficialPanel();
-        if (!officialPanel) throw new Error('官方升级面板加载超时');
-        state.data = parseOfficialPanel(officialPanel);
+        const url = `/u/${encodeURIComponent(username)}/upgrade-progress.json`;
+        const res = await fetch(url, {
+          credentials: 'same-origin',
+          headers: {
+            'Accept': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest'
+          }
+        });
+
+        if (!res.ok) {
+          if (res.status === 404) throw new Error(`未找到账号 [${username}] 的升级进度，请核对用户名`);
+          if (res.status === 403) throw new Error(`无权限访问（HTTP 403），请确认是否已在浏览器中登录 NodeLoc`);
+          throw new Error(`获取失败: HTTP ${res.status}`);
+        }
+
+        const json = await res.json();
+        state.data = parseUpgradeProgressJson(json);
         state.updatedAt = new Date();
       } catch (err) {
-        state.error = err.message || '成长指标采集异常';
+        state.error = err.message || '成长指标获取异常';
       } finally {
         state.loading = false;
-        closeOfficialMenu();
       }
       return state;
     }
@@ -1041,7 +1091,7 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
   }
 
   // ============================================================
-  // 悬浮控制面板 UI (支持胶囊拖拽、右下角基点缩放与微型操作)
+  // 悬浮控制面板 UI
   // ============================================================
   const panel = (() => {
     let el, statusEl, statsEl, replyTextarea, candidateList, sendBtn, logBox, sceneBadge;
@@ -1344,7 +1394,7 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
           <div id="nl-header">
             <div id="nl-header-title">
               <span>📖 NodeLoc 助手</span>
-              <span id="nl-badge">v21.6.0 · 说人话</span>
+              <span id="nl-badge">v21.7.0 · JSON直读</span>
             </div>
             <button class="nl-icon-btn" id="nl-btn-collapse" title="折叠为微型胶囊">一</button>
           </div>
@@ -1448,11 +1498,21 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
               </div>
             </div>
 
-            <!-- TAB 2: 成长指标看板 -->
+            <!-- TAB 2: 成长指标看板（官方 JSON 接口直读） -->
             <div class="nl-tab-content ${CFG.activeTab==='growth'?'active':''}" id="nl-tab-growth">
+              <!-- 用户名配置与切换栏 -->
+              <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; background:var(--nl-surface); padding:5px 8px; border-radius:8px; border:1px solid var(--nl-surface-border);">
+                <div style="display:flex; align-items:center; gap:4px; font-size:11px; overflow:hidden;">
+                  <span style="color:var(--nl-text-muted); flex-shrink:0;">👤 账号:</span>
+                  <input class="nl-input" type="text" id="nl-growth-user-input" value="${CFG.username}" placeholder="输入用户名(如 1751140932)" style="height:24px; padding:0 6px; font-size:11px; flex:1; min-width:80px;">
+                </div>
+                <button class="nl-btn-sm" id="nl-growth-user-save" style="padding:2px 7px; font-size:10px;">保存账号</button>
+              </div>
+
               <div id="nl-growth-content"></div>
-              <div style="display:flex; justify-content:space-between; align-items:center; margin-top:4px;">
-                <span id="nl-growth-time" style="font-size:10px; color:var(--nl-text-muted)">点击刷新同步最新数据</span>
+
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-top:2px;">
+                <span id="nl-growth-time" style="font-size:10px; color:var(--nl-text-muted)">接口直读 · 0 闪烁</span>
                 <button class="nl-btn-sm" id="nl-growth-refresh">↻ 刷新指标</button>
               </div>
             </div>
@@ -1473,6 +1533,11 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
 
             <!-- TAB 4: 设置与日志 -->
             <div class="nl-tab-content ${CFG.activeTab==='cfg'?'active':''}" id="nl-tab-cfg">
+              <div class="nl-input-group">
+                <label>NodeLoc 用户名 (用于成长看板 upgrade-progress.json):</label>
+                <input class="nl-input" type="text" id="nl-ai-username-cfg" value="${CFG.username}" placeholder="例如: 1751140932">
+              </div>
+
               <div class="nl-input-group">
                 <label>快捷导入 NewAPI JSON:</label>
                 <input class="nl-input" type="text" id="nl-ai-json-import" placeholder='{"key":"sk-...","url":"..."}'>
@@ -1523,10 +1588,8 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       replyCharCounter = el.querySelector('#nl-char-counter');
       sceneBadge       = el.querySelector('#nl-scene-badge');
 
-      // 关键改动：主卡片头与胶囊均支持拖拽，并提供防误触状态返回
       const dragTracker = makeDraggable(el, [el.querySelector('#nl-header'), miniCapsuleEl]);
 
-      // 关键改动：卡片向右下角收缩折叠
       function collapsePanel() {
         if (collapsed) return;
         const cardRect = cardEl.getBoundingClientRect();
@@ -1537,7 +1600,6 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
         CFG.panelCollapsed = true;
         el.classList.add('is-collapsed');
 
-        // 以卡片右下角为基准，将胶囊定位在该处
         const capsuleRect = miniCapsuleEl.getBoundingClientRect();
         const w = capsuleRect.width || 230;
         const h = capsuleRect.height || 34;
@@ -1554,7 +1616,6 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
         el.style.top = `${nextTop}px`;
       }
 
-      // 关键改动：从胶囊右下角向上、向左展开卡片，支持指定 Tab
       function expandPanel(targetTab = null) {
         if (!collapsed && !targetTab) return;
         const capsuleRect = miniCapsuleEl.getBoundingClientRect();
@@ -1595,21 +1656,18 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
 
       el.querySelector('#nl-btn-collapse').addEventListener('click', collapsePanel);
 
-      // 胶囊点击：非按钮且非拖拽时展开
       miniCapsuleEl.addEventListener('click', (e) => {
         if (dragTracker.wasDragged()) return;
         if (e.target.closest('button')) return;
         expandPanel();
       });
 
-      // 胶囊内按钮 1：快捷暂停/恢复
       el.querySelector('#nl-capsule-toggle').addEventListener('click', (e) => {
         e.stopPropagation();
         scroller.togglePause();
         updatePauseBtn();
       });
 
-      // 胶囊内按钮 2：快捷下一篇
       el.querySelector('#nl-capsule-skip').addEventListener('click', async (e) => {
         e.stopPropagation();
         replyStatusPinned = false;
@@ -1620,7 +1678,6 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
         else { panel.setStatus('未找到下一篇'); }
       });
 
-      // 胶囊内按钮 3：快捷直达成长 TL 看板
       el.querySelector('#nl-capsule-growth').addEventListener('click', (e) => {
         e.stopPropagation();
         expandPanel('growth');
@@ -1629,6 +1686,40 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       el.querySelectorAll('.nl-tab-btn').forEach(btn => {
         btn.addEventListener('click', () => switchTab(btn.dataset.tab));
       });
+
+      // 成长看板账号保存与刷新事件
+      const userInput = el.querySelector('#nl-growth-user-input');
+      const userSaveBtn = el.querySelector('#nl-growth-user-save');
+      const cfgUserInput = el.querySelector('#nl-ai-username-cfg');
+
+      function syncUsername(val) {
+        CFG.username = val;
+        if (userInput) userInput.value = val;
+        if (cfgUserInput) cfgUserInput.value = val;
+      }
+
+      if (userSaveBtn) {
+        userSaveBtn.addEventListener('click', () => {
+          const val = userInput.value.trim();
+          syncUsername(val);
+          refreshGrowthMetrics();
+        });
+      }
+
+      if (userInput) {
+        userInput.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            syncUsername(userInput.value.trim());
+            refreshGrowthMetrics();
+          }
+        });
+      }
+
+      if (cfgUserInput) {
+        cfgUserInput.addEventListener('input', (e) => {
+          syncUsername(e.target.value.trim());
+        });
+      }
 
       el.querySelector('#nl-growth-refresh').addEventListener('click', () => refreshGrowthMetrics());
       el.querySelector('#nl-clear-btn').addEventListener('click', () => HistoryManager.clear());
@@ -1856,8 +1947,21 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       if (!content) return;
 
       content.replaceChildren();
+
+      // 用户名未配置提示
+      if (!CFG.username) {
+        content.innerHTML = `
+          <div class="nl-card-hint" style="text-align:center; padding:16px 8px; display:flex; flex-direction:column; gap:6px;">
+            <div style="font-weight:700; font-size:12px; color:var(--nl-text);">💡 请先填写你的 NodeLoc 用户名</div>
+            <div style="font-size:10px; color:var(--nl-text-muted);">直接通过官方 JSON 接口读取，0 闪烁、不弹菜单、速度极快</div>
+            <div style="font-size:10px; color:var(--nl-primary);">在上方输入框填入你的用户名（如 1751140932）并保存即可</div>
+          </div>
+        `;
+        return;
+      }
+
       if (growthState.loading) {
-        content.innerHTML = '<div style="text-align:center; padding:20px 0; color:var(--nl-text-muted); font-size:11px;">⏳ 正在安全读取 NodeLoc 官方升级进度...</div>';
+        content.innerHTML = '<div style="text-align:center; padding:20px 0; color:var(--nl-text-muted); font-size:11px;">⏳ 正在通过官方 JSON 接口读取升级进度...</div>';
         return;
       }
       if (!growthState.data) {
@@ -1925,7 +2029,7 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
 
       content.append(headCard, grid);
       if (timeEl && growthState.updatedAt) {
-        timeEl.textContent = `同步时间: ${growthState.updatedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`;
+        timeEl.textContent = `已同步 [${CFG.username}]: ${growthState.updatedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`;
       }
     }
 
@@ -1945,7 +2049,6 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       }
     }
 
-    // 关键改动：支持多个手柄（卡片头部 + 胶囊），内置微小位移判断防止误判为拖拽
     function makeDraggable(container, handles) {
       let isDragging = false;
       let startX = 0, startY = 0;
@@ -2122,6 +2225,12 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
 
   // 初始化入口
   function init() {
+    // 优先尝试自动预填当前登录用户名
+    if (!CFG.username) {
+      const detected = detectCurrentUsername();
+      if (detected) CFG.username = detected;
+    }
+
     panel.build();
     if (isTopicPage()) {
       WorkerTimer.setTimeout(() => { scroller.start(); panel.updatePauseBtn(); }, 1500);

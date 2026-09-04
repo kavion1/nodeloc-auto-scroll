@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         NodeLoc Auto Scroll & Evidence-Grounded Replier (v21.7.1 - 接口防卡死与UI精调版)
+// @name         NodeLoc Auto Scroll & Evidence-Grounded Replier (v21.8.0 - 智能点赞集成版)
 // @namespace    http://tampermonkey.net/
-// @version      21.7.1
-// @description  升级成长看板：解决接口读取卡死与UI错位；GM_xhr与fetch双通道直读upgrade-progress.json；防异常崩盘兜底与页面DOM降级采集；全控件高精度垂直居中排版。
+// @version      21.8.0
+// @description  支持拟真漫游、说人话回帖与成长看板；新增帖子一键点赞与漫游自动点赞主帖功能，助力加速「送出的赞」成长指标达标。
 // @author       AutoScroll & shuorenhua
 // @match        https://www.nodeloc.com/*
 // @grant        GM_setValue
@@ -133,6 +133,8 @@
     set pauseChance(v)      { STORE.set('nl_pauseChance', v); },
     get autoNext()          { return STORE.get('nl_autoNext', true); },
     set autoNext(v)         { STORE.set('nl_autoNext', v); },
+    get autoLike()          { return STORE.get('nl_autoLike', false); },
+    set autoLike(v)         { STORE.set('nl_autoLike', v); },
     get panelCollapsed()    { return STORE.get('nl_collapsed', false); },
     set panelCollapsed(v)   { STORE.set('nl_collapsed', v); },
     get activeTab()         { return STORE.get('nl_active_tab', 'roam'); },
@@ -1151,6 +1153,152 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
   }
 
   // ============================================================
+  // 点赞管理模块（主帖点赞 / 自动点赞）
+  // ============================================================
+  const LikeManager = (() => {
+    const likedTopicIds = new Set();
+
+    function getFirstPostElement() {
+      return document.querySelector('#post_1, article[data-post-number="1"], [data-post-number="1"], .topic-post:first-of-type');
+    }
+
+    function getFirstPostLikeButton() {
+      const postEl = getFirstPostElement();
+      if (!postEl) return null;
+
+      const selectors = [
+        'button.btn-toggle-reaction.like',
+        'button.toggle-like',
+        'button.widget-button.like',
+        'button.like',
+        'button[aria-label*="点赞"]',
+        'button[aria-label*="赞"]',
+        'button[title*="点赞"]',
+        'button[title*="赞"]',
+        '.post-controls button.like',
+        '.post-controls button.toggle-like'
+      ];
+
+      for (const sel of selectors) {
+        const btn = postEl.querySelector(sel);
+        if (btn) return btn;
+      }
+      return null;
+    }
+
+    function isFirstPostLiked() {
+      const btn = getFirstPostLikeButton();
+      if (!btn) {
+        const tid = getTopicId();
+        return tid ? likedTopicIds.has(String(tid)) : false;
+      }
+      if (btn.classList.contains('has-like') || btn.classList.contains('my-likes') || btn.classList.contains('liked')) {
+        return true;
+      }
+      if (btn.getAttribute('aria-pressed') === 'true') return true;
+      const title = (btn.getAttribute('title') || btn.getAttribute('aria-label') || '').toLowerCase();
+      if (title.includes('取消点赞') || title.includes('取消赞') || title.includes('unlike')) return true;
+      return false;
+    }
+
+    async function likeViaApi(postId) {
+      const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content
+        || window.Discourse?.csrfToken
+        || '';
+
+      const res = await fetch('/post_actions', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+          ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {})
+        },
+        body: JSON.stringify({
+          id: Number(postId),
+          post_action_type_id: 2
+        })
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        const errMsg = (errJson.errors && errJson.errors[0]) || `HTTP ${res.status}`;
+        throw new Error(errMsg);
+      }
+      return await res.json();
+    }
+
+    async function getFirstPostId() {
+      const postEl = getFirstPostElement();
+      if (postEl) {
+        const pid = postEl.getAttribute('data-post-id') || postEl.dataset?.postId;
+        if (pid) return pid;
+      }
+      const topicId = getTopicId();
+      if (!topicId) return null;
+      try {
+        const res = await fetch(`/t/${topicId}.json`, { credentials: 'same-origin' });
+        if (res.ok) {
+          const data = await res.json();
+          const first = data?.post_stream?.posts?.[0];
+          if (first?.id) return first.id;
+        }
+      } catch (e) {}
+      return null;
+    }
+
+    async function likeTopic(force = false) {
+      if (!isTopicPage()) {
+        return { success: false, reason: '非帖子页面' };
+      }
+
+      const topicId = getTopicId();
+      if (topicId && likedTopicIds.has(String(topicId)) && !force) {
+        return { success: true, alreadyLiked: true, reason: '本帖已点过赞' };
+      }
+
+      // 1. 优先尝试点击 DOM 中的点赞按钮
+      const btn = getFirstPostLikeButton();
+      if (btn) {
+        if (isFirstPostLiked()) {
+          if (topicId) likedTopicIds.add(String(topicId));
+          return { success: true, alreadyLiked: true, reason: '楼主已处于点赞状态' };
+        }
+        btn.click();
+        if (topicId) likedTopicIds.add(String(topicId));
+        return { success: true, reason: '已成功为楼主点赞(DOM)' };
+      }
+
+      // 2. 备用方式：通过 Discourse API 点赞
+      const postId = await getFirstPostId();
+      if (postId) {
+        try {
+          await likeViaApi(postId);
+          if (topicId) likedTopicIds.add(String(topicId));
+          return { success: true, reason: '已成功为楼主点赞(API)' };
+        } catch (err) {
+          if (err.message?.includes('已经') || err.message?.includes('already')) {
+            if (topicId) likedTopicIds.add(String(topicId));
+            return { success: true, alreadyLiked: true, reason: '楼主此前已点过赞' };
+          }
+          throw err;
+        }
+      }
+
+      throw new Error('未检测到点赞按钮（可能为自己的帖子）');
+    }
+
+    return {
+      getFirstPostLikeButton,
+      isFirstPostLiked,
+      likeTopic,
+      isTopicLikedInMemory: (tid) => likedTopicIds.has(String(tid)),
+      markTopicLiked: (tid) => { if (tid) likedTopicIds.add(String(tid)); }
+    };
+  })();
+
+  // ============================================================
   // AutoScroller 核心控制器
   // ============================================================
   class AutoScroller {
@@ -1161,6 +1309,7 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       this._timerId = null;
       this._topicStartTime = 0;
       this._tickCount = 0;
+      this._hasLikedCurrentTopic = false;
     }
 
     start() {
@@ -1169,6 +1318,7 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       this.paused = false;
       this.pausedByHidden = false;
       this._topicStartTime = Date.now();
+      this._hasLikedCurrentTopic = false;
       HumanEngine._readingPauseUntil = 0;
 
       const curId = getTopicId();
@@ -1229,6 +1379,23 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
 
       if (this._tickCount % 4 === 0) {
         panel.updateLiveMetrics(pct, dwellElapsed, targetDwell, estimatedTimings);
+      }
+
+      // 漫游自动点赞主帖（开启时在驻留 >= 15s 或滚动 >= 50% 时自动为楼主点赞）
+      if (CFG.autoLike && !this._hasLikedCurrentTopic && isTopicPage()) {
+        if (dwellElapsed >= 15 || pct >= 50) {
+          this._hasLikedCurrentTopic = true;
+          LikeManager.likeTopic().then(res => {
+            if (res?.success) {
+              panel.setLikeButtonState(true);
+              if (!res.alreadyLiked) {
+                panel.setStatus('👍 漫游中已自动为楼主点赞！', true);
+              }
+            }
+          }).catch(err => {
+            console.warn('[NodeLoc] 自动点赞未执行:', err.message);
+          });
+        }
       }
 
       // 6 分钟封顶强切
@@ -1413,13 +1580,16 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
 
       .nl-quick-actions { display: flex; gap: 6px; margin-top: 2px; }
       .nl-btn-quick {
-        flex: 1; padding: 5px 0; border-radius: 8px; border: none; font-size: 11px; font-weight: 600;
+        flex: 1; min-width: 0; padding: 5px 0; border-radius: 8px; border: none; font-size: 11px; font-weight: 600;
         cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 4px; transition: 0.15s;
+        white-space: nowrap; user-select: none;
       }
       .nl-btn-quick.primary { background: var(--nl-primary); color: #fff; }
       .nl-btn-quick.primary:hover { background: var(--nl-primary-hover); }
       .nl-btn-quick.secondary { background: var(--nl-surface-border); color: var(--nl-text); }
       .nl-btn-quick.secondary:hover { background: var(--nl-surface-hover); }
+      .nl-btn-quick.liked { background: rgba(239, 68, 68, 0.12); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.25); }
+      .nl-btn-quick.liked:hover { background: rgba(239, 68, 68, 0.2); }
 
       #nl-tabs {
         display: flex; background: var(--nl-surface); padding: 4px 6px;
@@ -1673,6 +1843,7 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
             </div>
             <div class="nl-quick-actions">
               <button class="nl-btn-quick primary" id="nl-pause-btn">⏸ 暂停</button>
+              <button class="nl-btn-quick secondary" id="nl-like-btn" title="为本帖楼主点赞 (快捷键 L)">👍 点赞</button>
               <button class="nl-btn-quick secondary" id="nl-skip-btn">⏭ 下一篇</button>
             </div>
           </div>
@@ -1739,8 +1910,16 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
                 </label>
               </div>
 
+              <div class="nl-row">
+                <span class="nl-row-label">漫游时自动点赞主帖</span>
+                <label class="nl-toggle" title="漫游阅读达到15秒或进度过半时，自动为楼主点赞，助力「送出的赞」成长指标达标。">
+                  <input type="checkbox" id="nl-auto-like" ${CFG.autoLike?'checked':''}>
+                  <span class="nl-track"></span>
+                </label>
+              </div>
+
               <div class="nl-card-hint">
-                ⚡ 封顶强切已开启：单帖达到 6 分钟（360s）时长收益天花板时自动平滑跳走，长帖无需死等到底部。
+                ⚡ 封顶强切已开启：单帖达到 6 分钟（360s）时长收益天花板时自动平滑跳走；开启自动点赞可在漫游阅读时自动积累赞数。
               </div>
 
               <div class="nl-row" style="margin-top:auto; font-size:10px; color:var(--nl-text-muted)">
@@ -2006,6 +2185,11 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       el.querySelector('#nl-pause-on-hidden').addEventListener('change', e => { CFG.pauseOnHidden = e.target.checked; });
       el.querySelector('#nl-auto-next').addEventListener('change', e => { CFG.autoNext = e.target.checked; });
 
+      const autoLikeEl = el.querySelector('#nl-auto-like');
+      if (autoLikeEl) {
+        autoLikeEl.addEventListener('change', e => { CFG.autoLike = e.target.checked; });
+      }
+
       el.querySelectorAll('.nl-pill-btn').forEach(btn => {
         btn.addEventListener('click', () => {
           const mode = btn.dataset.mode;
@@ -2021,6 +2205,36 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
         scroller.togglePause();
         updatePauseBtn();
       });
+
+      const likeBtn = el.querySelector('#nl-like-btn');
+      if (likeBtn) {
+        likeBtn.addEventListener('click', async () => {
+          replyStatusPinned = false;
+          if (!isTopicPage()) {
+            panel.setStatus('请先进入具体的文章帖子页面');
+            return;
+          }
+          likeBtn.disabled = true;
+          const origText = likeBtn.textContent;
+          likeBtn.textContent = '⏳ 点赞中...';
+          try {
+            const res = await LikeManager.likeTopic(true);
+            if (res.success) {
+              setLikeButtonState(true);
+              panel.setStatus(res.alreadyLiked ? '❤️ 楼主此前已处于点赞状态' : '🎉 点赞成功！感谢分享！', true);
+            } else {
+              panel.setStatus('⚠️ ' + (res.reason || '点赞未完成'), true);
+              likeBtn.textContent = origText;
+            }
+          } catch (err) {
+            console.error('[NodeLoc] 点赞失败:', err);
+            panel.setStatus('❌ 点赞失败: ' + (err.message || '未知错误'), true);
+            likeBtn.textContent = origText;
+          } finally {
+            likeBtn.disabled = false;
+          }
+        });
+      }
 
       el.querySelector('#nl-skip-btn').addEventListener('click', async () => {
         replyStatusPinned = false;
@@ -2484,7 +2698,38 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       }
     }
 
-    return { build, setStatus, setActivityStatus, updateLiveMetrics, updateStats, updatePauseBtn };
+    function setLikeButtonState(isLiked) {
+      const btn = el && el.querySelector('#nl-like-btn');
+      if (!btn) return;
+      if (isLiked) {
+        btn.textContent = '❤️ 已赞';
+        btn.className = 'nl-btn-quick secondary liked';
+        btn.title = '楼主已赞';
+      } else {
+        btn.textContent = '👍 点赞';
+        btn.className = 'nl-btn-quick secondary';
+        btn.title = '为本帖楼主点赞 (快捷键 L)';
+      }
+    }
+
+    function updateLikeBtn() {
+      const btn = el && el.querySelector('#nl-like-btn');
+      if (!btn) return;
+      if (!isTopicPage()) {
+        btn.style.opacity = '0.45';
+        btn.style.cursor = 'not-allowed';
+        btn.textContent = '👍 点赞';
+        btn.className = 'nl-btn-quick secondary';
+        btn.title = '非帖子页面不可点赞';
+        return;
+      }
+      btn.style.opacity = '';
+      btn.style.cursor = 'pointer';
+      const isLiked = LikeManager.isFirstPostLiked();
+      setLikeButtonState(isLiked);
+    }
+
+    return { build, setStatus, setActivityStatus, updateLiveMetrics, updateStats, updatePauseBtn, setLikeButtonState, updateLikeBtn };
   })();
 
   // ============================================================
@@ -2499,9 +2744,14 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
     currentPath = np;
     scroller.stop();
     panel.updatePauseBtn();
+    panel.updateLikeBtn();
     if (isTopicPage()) {
       panel.setStatus('进入新贴，准备拟真漫游...');
-      WorkerTimer.setTimeout(() => { scroller.start(); panel.updatePauseBtn(); }, 1200);
+      WorkerTimer.setTimeout(() => {
+        scroller.start();
+        panel.updatePauseBtn();
+        panel.updateLikeBtn();
+      }, 1200);
     } else {
       panel.setStatus('请点击帖子进入阅读');
     }
@@ -2533,6 +2783,21 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       scroller.stop();
       getNextTopicUrl().then(url => { if (url) navigateSpa(url); });
     }
+    if (e.key === 'l' || e.key === 'L') {
+      if (isTopicPage()) {
+        panel.setStatus('👍 正在为楼主点赞...', true);
+        LikeManager.likeTopic(true).then(res => {
+          if (res?.success) {
+            panel.setLikeButtonState(true);
+            panel.setStatus(res.alreadyLiked ? '❤️ 楼主此前已处于点赞状态' : '🎉 点赞成功！感谢分享！', true);
+          } else {
+            panel.setStatus('⚠️ ' + (res?.reason || '点赞未完成'), true);
+          }
+        }).catch(err => {
+          panel.setStatus('❌ 点赞失败: ' + (err.message || '未知错误'), true);
+        });
+      }
+    }
   });
 
   // 初始化入口
@@ -2544,8 +2809,13 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
     }
 
     panel.build();
+    panel.updateLikeBtn();
     if (isTopicPage()) {
-      WorkerTimer.setTimeout(() => { scroller.start(); panel.updatePauseBtn(); }, 1500);
+      WorkerTimer.setTimeout(() => {
+        scroller.start();
+        panel.updatePauseBtn();
+        panel.updateLikeBtn();
+      }, 1500);
     } else {
       panel.setStatus('请点击帖子进入阅读');
     }

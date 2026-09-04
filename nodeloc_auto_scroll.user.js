@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         NodeLoc Auto Scroll & Evidence-Grounded Replier (v21.4.1 - 成长指标与交互优化版)
+// @name         NodeLoc Auto Scroll & Evidence-Grounded Replier (v21.6.0 - 胶囊全能交互版)
 // @namespace    http://tampermonkey.net/
-// @version      21.4.1
-// @description  支持 NodeLoc 深度漫游、成长指标看板（自动静默采集官方进度）、有依据的智能回帖；对齐 Discourse 60s timing 机制与 6 分钟收益封顶强切；优化现代卡片Tab、双轨进度条与胶囊态。
-// @author       AutoScroll
+// @version      21.6.0
+// @description  胶囊支持拖拽、右下角基准缩放、胶囊快捷下一篇与成长看板直达，深度融合 shuorenhua 去AI味引擎。
+// @author       AutoScroll & shuorenhua
 // @match        https://www.nodeloc.com/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -52,7 +52,7 @@
           if (cb) cb();
         };
       } catch (err) {
-        console.warn('[NodeLoc v21.4.1] Worker 初始化失败，降级使用原生计时器:', err);
+        console.warn('[NodeLoc v21.6.0] Worker 初始化失败，降级使用原生计时器:', err);
         worker = null;
       }
       return worker;
@@ -174,7 +174,7 @@
   };
 
   // ============================================================
-  // 成长指标采集模块（带静默自动关闭菜单优化）
+  // 成长指标采集模块
   // ============================================================
   const GrowthMetrics = (() => {
     const state = { data: null, updatedAt: null, loading: false, error: '' };
@@ -334,19 +334,48 @@
   }
 
   // ============================================================
-  // 回复上下文筛选管道
+  // 回复筛选管道（融合 shuorenhua 去 AI 味核心体系）
   // ============================================================
   const ReplyPipeline = {
     BANNED_PATTERNS: [
-      /感谢.{0,4}分享/i, /干货满满/i, /值得收藏/i, /受益匪浅/i,
-      /很有参考价值/i, /总结.{0,4}到位/i, /思路清晰/i, /深入浅出/i,
-      /写得很好/i, /很有深度/i, /作为\s*(?:ai|人工智能)/i
+      /感谢.{0,4}(?:分享|楼主|大[神佬]|整理)/i, /干货满满/i, /受益匪浅/i, /值得收藏/i,
+      /写得?(?:太好了|真棒|真详细|很好)/i, /很有参考价值/i, /总结.{0,4}到位/i,
+      /思路清晰/i, /深入浅出/i, /很有深度/i, /字字珠玑/i, /先赞后看|码住|马克/i,
+      /受教了/i, /楼主好人/i,
+      /作为\s*(?:ai|人工智能|语言模型|助手)/i, /希望(?:能)?对你有?所?帮助/i,
+      /如果有?(?:任何)?疑问/i, /欢迎(?:在下方)?(?:交流|讨论|留言)/i,
+      /随时(?:问我|交流)/i, /为你解答/i, /很高兴为您/i,
+      /与其说.{1,10}不如说/i, /不是.{1,10}而是/i, /如果我告诉你/i, /你心动了吗/i,
+      /让我们?拭目以待/i, /开启.{0,4}新篇章/i, /迈向新台阶/i, /里程碑/i,
+      /未来可期/i, /共同见证/i, /全新跃迁/i, /稳稳接住/i,
+      /赋能/i, /闭环/i, /抓手/i, /打通底层逻辑/i, /组合拳/i, /系统性重塑/i,
+      /降本增效/i, /多维度/i, /全方位/i, /价值链/i,
+      /总的来说/i, /综上所述/i, /不得不说/i, /不可否认/i, /显而易见/i,
+      /值得一提的是/i, /毋庸置疑/i, /正如前文所述/i, /毫无疑问/i,
+      /(?:大家|你)(?:觉得呢|怎么看)[？?]?$/i
     ],
 
     AGGRESSIVE_PATTERNS: [
       /傻[子逼瓜]?/i, /蠢/i, /垃圾/i, /废物/i, /智商/i,
       /笑死/i, /活该/i, /割韭菜/i, /脑残/i, /骗[子钱]?/i
     ],
+
+    detectScene(title, mainContent) {
+      const text = `${title} ${mainContent}`.toLowerCase();
+      if (/抽奖|口令|红包|福袋|抽券|能量|盖楼|散财|福利|庆祝/i.test(text)) {
+        return { id: 'lottery', label: '抽奖福利', icon: '🎁' };
+      }
+      if (/测速|测评|跑分|评测|路由|回程|晚高峰|丢包|延迟|网络|三网|4837|9929|cmin2|gia|节点|搭建|docker/i.test(text)) {
+        return { id: 'tech_benchmark', label: '测速技术', icon: '⚡' };
+      }
+      if (/出|收|盘|溢价|剩余价值|改邮箱|push|续费|出台|出个|明盘|自提|吃灰/i.test(text)) {
+        return { id: 'trade', label: '集市交易', icon: '💰' };
+      }
+      if (/求助|报错|无法连接|超时|救砖|失联|封ip|怎么解决|求教|请问|求解|请教/i.test(text)) {
+        return { id: 'troubleshoot', label: '排障求助', icon: '🛠️' };
+      }
+      return { id: 'general', label: '日常杂谈', icon: '💬' };
+    },
 
     getVisibleLength(text) {
       return Array.from(String(text || '')).filter(char => !/\s/.test(char)).length;
@@ -359,8 +388,8 @@
         .filter(s => this.getVisibleLength(s) >= 6);
 
       const titleTerms = String(title || '').match(/[a-z0-9\u4e00-\u9fa5]{2,}/ig) || [];
-      const factPattern = /\d|ip|vps|cpu|内存|流量|带宽|延迟|套餐|配置|测速|价格|费用|开卡|注册|升级|等级|时长|积分|规则|机制|抽奖|能量|券|挂起|门控|教程|实测/i;
-      const keySectionPattern = /费用|条件|步骤|规则|总结|结论|实测|注意|建议|阈值|限制|方法|踩坑|口令|要求/i;
+      const factPattern = /\d|ip|vps|cpu|内存|流量|带宽|延迟|套餐|配置|测速|价格|费用|开卡|注册|升级|等级|时长|积分|规则|机制|抽奖|能量|券|挂起|门控|教程|实测|搬瓦工|斯巴达|甲骨文|瓦工|cc|rn|dmit|hetzner|ovh|ping/i;
+      const keySectionPattern = /费用|条件|步骤|规则|总结|结论|实测|注意|建议|阈值|限制|方法|踩坑|口令|要求|线路|机房/i;
 
       return rawSentences.map((sentence, index) => ({
         sentence,
@@ -375,11 +404,19 @@
         .slice(0, 6);
     },
 
+    cleanCandidate(raw) {
+      return String(raw || '')
+        .replace(/^["'“”‘’]+|["'“”‘’]+$/g, '')
+        .replace(/^\s*(?:[-*]|(?:候选\s*)?\d+[.、):：])\s*/, '')
+        .replace(/[。！!？?]+$/, '')
+        .trim();
+    },
+
     isCandidateValid(candidate) {
       const isBanned = this.BANNED_PATTERNS.some(p => p.test(candidate));
       const isAggressive = this.AGGRESSIVE_PATTERNS.some(p => p.test(candidate));
       const len = this.getVisibleLength(candidate);
-      return !isBanned && !isAggressive && len >= 4 && len <= 50;
+      return !isBanned && !isAggressive && len >= 6 && len <= 45;
     },
 
     validateCandidates(candidates) {
@@ -387,7 +424,7 @@
       const candidateChecks = [];
 
       for (const rawCandidate of candidates || []) {
-        const candidate = String(rawCandidate || '').replace(/。+$/, '').trim();
+        const candidate = this.cleanCandidate(rawCandidate);
         const isValid = this.isCandidateValid(candidate) && !validCandidates.includes(candidate);
         candidateChecks.push({ candidate, isValid });
         if (isValid) validCandidates.push(candidate);
@@ -450,8 +487,8 @@
       return String(text || '')
         .replace(/```(?:json)?/gi, '')
         .split(/\r?\n/)
-        .map(line => line.replace(/^\s*(?:[-*]|(?:候选\s*)?\d+[.、):：])\s*/, '').trim())
-        .filter(line => line.length >= 4 && !/[\[{]/.test(line))
+        .map(line => this.cleanCandidate(line))
+        .filter(line => line.length >= 6 && !/[\[{]/.test(line))
         .slice(0, 3);
     },
 
@@ -469,7 +506,7 @@
         try {
           const parsed = JSON.parse(jsonPayload);
           candidates = this.getCandidateItems(parsed)
-            .map(item => this.getCandidateText(item))
+            .map(item => this.cleanCandidate(this.getCandidateText(item)))
             .filter(Boolean)
             .slice(0, 3);
           parseMode = 'json';
@@ -584,9 +621,7 @@
       const recentReplies = rawReplies.slice(-10);
       const allReplies = recentReplies.map(p => `【${p.postNumber}楼 @${p.username}】：${p.text.slice(0, 120)}`);
 
-      const isLottery = /抽奖|口令|红包|福袋|抽券|能量/i.test(title) ||
-        Array.from(document.querySelectorAll('.discourse-tag')).some(t => /抽奖|福利|活动/i.test(t.innerText));
-
+      const scene = ReplyPipeline.detectScene(title, mainContent);
       const mainFacts = ReplyPipeline.selectMainFacts(mainContent, title);
       const sourceText = [title, mainContent, ...allReplies].filter(Boolean).join('\n');
 
@@ -595,7 +630,7 @@
         mainContent,
         mainFacts,
         allReplies,
-        isLottery,
+        scene,
         imageInfo: imageDescriptions.length > 0 ? imageDescriptions.join('、') : '无图片',
         sourceText
       };
@@ -608,22 +643,35 @@
 
       const ctx = await this.getTopicFullContext();
 
-      const lotteryPrompt = ctx.isLottery
-        ? `\n【特别注意：本帖为抽奖/活动帖】：若楼主或楼下有明确抽奖口令或指定格式，候选回复中必须优先提供严格符合口令的格式；若无特定口令，请生成真诚实在、符合论坛氛围的参与祝愿（如“分母来了”、“支持大佬，碰碰运气”等），切勿强行长篇大论说教。`
-        : '';
+      let sceneInstruction = '';
+      if (ctx.scene.id === 'lottery') {
+        sceneInstruction = `\n【当前场景：抽奖福利】必须严格提取主楼或楼下的指定口令格式；若无口令，只需一句真诚自然的随手祝福或参与（如“支持大佬，当个分母”、“碰碰运气看能不能中”），绝对不要长篇大论或高谈阔论。`;
+      } else if (ctx.scene.id === 'tech_benchmark') {
+        sceneInstruction = `\n【当前场景：测速技术/配置测评】围绕线路稳定性、延迟、晚高峰、丢包或套餐性价比简明点评或提问（如“这晚高峰回程看着挺稳”、“哪个机房的，看着性价比还行”），保持技术真实感，严禁空洞夸赞。`;
+      } else if (ctx.scene.id === 'trade') {
+        sceneInstruction = `\n【当前场景：集市交易/收出机器】针对价格、剩余价值、续费成本、push费用或配置简短接话（如“这价位还可以，祝早出”、“续费多少一年，绑定邮箱出吗”），客观直接。`;
+      } else if (ctx.scene.id === 'troubleshoot') {
+        sceneInstruction = `\n【当前场景：排障求助】直接点出可能的排查方向或原因（如“先看看安全组端口放行没”、“可能是DNS解析慢，改个公共DNS试试”），不讲安慰套话。`;
+      } else {
+        sceneInstruction = `\n【当前场景：日常杂谈】像论坛常驻老友随手接话，语气随和接地气，就事论事或轻度调侃。`;
+      }
 
-      const systemPrompt = `你是一个活跃在 NodeLoc / Linux.do 论坛的技术爱好者，正在手机上随和地浏览帖子并准备跟帖交流。
-请根据提供的帖子标题、主楼事实与楼下各楼层最新讨论，生成三条风格不同、自然实在、友善中肯的口语化候选回复。${lotteryPrompt}
+      const systemPrompt = `你是在 NodeLoc / Linux.do 论坛活跃的技术爱好者，正在用手机随手浏览帖子并准备回帖。
+你的目标是基于主楼事实和最新讨论，输出 3 条不同角度、自然实在、不装腔作势的口语化候选回复。${sceneInstruction}
 
-【规则与红线】：
-1. 态度友善和气，严禁任何主观恶意、阴阳怪气、戾气、无端嘲讽或攻击。
-2. 严禁任何AI假大空套话（如“感谢分享/干货满满/受益匪浅/很有参考价值/总结到位/思路清晰/深入浅出”等）。
-3. 紧密结合主楼事实或顺着楼下网友讨论的话题发表看法，末尾不加句号。
-4. 每条候选长度控制在 8 到 35 个汉字，口语自然。
+【说人话（shuorenhua）核心规范与红线】：
+1. 优先保事实，绝不编造基数、配置或结果，保留技术术语与主楼核心数据。
+2. 严禁一切模板套话与伪客套：绝不允许出现“感谢分享、干货满满、受益匪浅、值得收藏、写得很好、思路清晰、字字珠玑”等。
+3. 严禁结构反模式：
+   - 禁二元假对比（“不是……而是……”、“比起……更……”）。
+   - 禁假升华与宏大愿景（“拭目以待”、“开启新篇章”、“迈向新台阶”、“里程碑”）。
+   - 禁机械过渡与总结式收尾（“总的来说”、“综上所述”、“不得不说”、“不可否认”）。
+   - 禁客服腔与末尾反问（“希望对你有帮助”、“你怎么看呢”、“欢迎讨论”）。
+4. 长度控制在 8 到 30 个字之间，口语自然，末尾严禁加句号（就像手机真人在论坛随手敲字）。
 
 【输出格式要求】：
-必须仅输出一个合法 JSON 对象，格式严格如下（严禁任何 Markdown 标记或多余解释）：
-{"candidates":["候选回复1","候选回复2","候选回复3"]}`;
+必须仅输出一个合法 JSON 对象（严禁任何 Markdown 代码块或多余解释）：
+{"candidates":["候选1","候选2","候选3"]}`;
 
       const userPrompt = `【帖子标题】：${ctx.title}
 【主楼核心事实】：
@@ -632,7 +680,7 @@ ${ctx.mainFacts.join('\n') || ctx.mainContent || '（无可用正文）'}
 【楼下最新讨论】：
 ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
 
-请输出 3 条自然、友善、切合主题的候选回复 JSON：`;
+请按说人话规范，输出 3 条自然口语化、符合 NodeLoc 氛围的候选回复 JSON：`;
 
       let url = CFG.apiUrl.trim().replace(/\/+$/, '');
       const isAnthropic = CFG.apiFormat === 'anthropic';
@@ -646,7 +694,8 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
           userPrompt,
           model: CFG.modelName,
           format: CFG.apiFormat,
-          title: ctx.title
+          title: ctx.title,
+          scene: ctx.scene.label
         },
         result: { status: 'pending' }
       });
@@ -713,6 +762,7 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
 
                 RequestLog.update(requestLogId, {
                   status: 'success',
+                  scene: ctx.scene.label,
                   rawReply: modelReply,
                   parseMode: payload.parseMode,
                   rawCandidates: payload.candidates,
@@ -723,6 +773,7 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
 
                 resolve({
                   parseMode: payload.parseMode,
+                  scene: ctx.scene,
                   rawCandidates: payload.candidates,
                   candidateChecks: validation.candidateChecks,
                   validCandidates: validation.validCandidates,
@@ -990,10 +1041,10 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
   }
 
   // ============================================================
-  // 现代化悬浮控制面板 UI (样式与对齐彻底重构)
+  // 悬浮控制面板 UI (支持胶囊拖拽、右下角基点缩放与微型操作)
   // ============================================================
   const panel = (() => {
-    let el, statusEl, statsEl, replyTextarea, candidateList, sendBtn, logBox;
+    let el, statusEl, statsEl, replyTextarea, candidateList, sendBtn, logBox, sceneBadge;
     let progressBarFill, dwellBarFill, miniCapsuleEl, cardEl, replyCharCounter;
     let collapsed = CFG.panelCollapsed;
     let replyStatusPinned = false;
@@ -1039,14 +1090,15 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       }
       #nl-panel * { box-sizing: border-box; }
 
+      /* 超轻量全功能胶囊态 */
       #nl-mini-capsule {
-        display: none; align-items: center; gap: 8px;
+        display: none; align-items: center; gap: 6px;
         background: var(--nl-bg); border: 1px solid var(--nl-border);
-        border-radius: 30px; padding: 6px 12px; box-shadow: var(--nl-shadow);
-        cursor: pointer; backdrop-filter: blur(14px); font-size: 11px; white-space: nowrap;
-        transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+        border-radius: 30px; padding: 5px 10px; box-shadow: var(--nl-shadow);
+        cursor: move; backdrop-filter: blur(14px); font-size: 11px; white-space: nowrap;
+        user-select: none; transition: box-shadow 0.2s ease;
       }
-      #nl-mini-capsule:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(10,124,255,0.28); }
+      #nl-mini-capsule:hover { box-shadow: 0 8px 24px rgba(10,124,255,0.28); }
       #nl-panel.is-collapsed #nl-mini-capsule { display: flex; }
       #nl-panel.is-collapsed #nl-card { display: none; }
 
@@ -1063,9 +1115,13 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
 
       .nl-capsule-btn {
         background: var(--nl-surface-border); border: none; border-radius: 12px;
-        padding: 2px 7px; font-size: 10px; font-weight: bold; color: var(--nl-text); cursor: pointer;
+        padding: 2px 7px; font-size: 10px; font-weight: 700; color: var(--nl-text); cursor: pointer;
+        display: inline-flex; align-items: center; gap: 2px; line-height: 1.3; flex-shrink: 0;
+        transition: 0.15s;
       }
       .nl-capsule-btn:hover { background: var(--nl-primary); color: #fff; }
+      .nl-capsule-btn.growth { background: rgba(245, 158, 11, 0.15); color: #d97706; }
+      .nl-capsule-btn.growth:hover { background: var(--nl-accent); color: #fff; }
 
       #nl-card {
         background: var(--nl-bg); border: 1px solid var(--nl-border);
@@ -1128,8 +1184,7 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       .nl-tab-btn {
         flex: 1 1 0; min-width: 0; height: 30px; padding: 0 2px; border: none; background: none;
         border-radius: 6px; font-size: 11px; font-weight: 600; color: var(--nl-text-muted); cursor: pointer;
-        display: flex; align-items: center; justify-content: center; gap: 3px;
-        white-space: nowrap;
+        display: flex; align-items: center; justify-content: center; gap: 3px; white-space: nowrap;
       }
       .nl-tab-btn.active {
         background: var(--nl-bg); color: var(--nl-primary); box-shadow: 0 1px 3px rgba(0,0,0,0.06);
@@ -1236,8 +1291,6 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
         background: var(--nl-surface); display: flex; flex-direction: column; gap: 2px; min-width: 0;
       }
       .nl-growth-card.reached { border-color: rgba(16, 185, 129, 0.4); background: rgba(16, 185, 129, 0.03); }
-
-      /* 奇数末尾卡片自动跨行铺满 */
       .nl-growth-card:last-child:nth-child(odd) { grid-column: span 2; }
       .nl-growth-card:last-child:nth-child(odd) .nl-card-nums { display: flex; align-items: baseline; gap: 6px; }
 
@@ -1277,11 +1330,13 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       if (collapsed) el.classList.add('is-collapsed');
 
       el.innerHTML = `
-        <!-- 超轻量胶囊态 -->
-        <div id="nl-mini-capsule" title="点击展开 NodeLoc 漫游面板">
+        <!-- 超轻量全能胶囊态：按住可拖动，支持快捷暂停、下一篇、成长TL直达 -->
+        <div id="nl-mini-capsule" title="按住可拖拽移动，点击空白处展开面板">
           <span class="nl-pulse-dot" id="nl-capsule-dot"></span>
-          <span id="nl-capsule-text">73% · 60s</span>
-          <button class="nl-capsule-btn" id="nl-capsule-toggle">⏸</button>
+          <span id="nl-capsule-text">0% · 0s</span>
+          <button class="nl-capsule-btn" id="nl-capsule-toggle" title="暂停/继续漫游">⏸</button>
+          <button class="nl-capsule-btn" id="nl-capsule-skip" title="跳过当前帖，阅读下一篇">⏭</button>
+          <button class="nl-capsule-btn growth" id="nl-capsule-growth" title="直达升级进度看板">📈 <span id="nl-capsule-tl-badge">TL</span></button>
         </div>
 
         <!-- 主面板 -->
@@ -1289,7 +1344,7 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
           <div id="nl-header">
             <div id="nl-header-title">
               <span>📖 NodeLoc 助手</span>
-              <span id="nl-badge">v21.4.1</span>
+              <span id="nl-badge">v21.6.0 · 说人话</span>
             </div>
             <button class="nl-icon-btn" id="nl-btn-collapse" title="折叠为微型胶囊">一</button>
           </div>
@@ -1321,7 +1376,7 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
             </div>
           </div>
 
-          <!-- 彻底对齐无挤压的 Tabs 导航 -->
+          <!-- Tabs 导航 -->
           <div id="nl-tabs">
             <button class="nl-tab-btn ${CFG.activeTab==='roam'?'active':''}" data-tab="roam">
               🚀 漫游
@@ -1402,10 +1457,13 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
               </div>
             </div>
 
-            <!-- TAB 3: 智能回帖 -->
+            <!-- TAB 3: 智能回帖（说人话强化版） -->
             <div class="nl-tab-content ${CFG.activeTab==='ai'?'active':''}" id="nl-tab-ai">
+              <div id="nl-scene-badge" class="nl-card-hint" style="color:var(--nl-primary); font-weight:600; padding:4px 8px;">
+                🌿 说人话 (shuorenhua) 去AI味引擎已就绪
+              </div>
               <div id="nl-candidate-list"></div>
-              <textarea id="nl-reply-textarea" placeholder="点击下方「💡 生成本帖候选」，支持抽奖自动识别口令，可在此微调..."></textarea>
+              <textarea id="nl-reply-textarea" placeholder="点击下方「💡 生成本帖候选」，自动去除AI味与模板套话，可在此微调..."></textarea>
               <div class="nl-char-counter" id="nl-char-counter">当前: 0 字</div>
               <div style="display:flex; gap:6px;">
                 <button class="nl-btn-action generate" id="nl-generate-btn">💡 生成本帖候选</button>
@@ -1463,36 +1521,113 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       sendBtn          = el.querySelector('#nl-send-btn');
       logBox           = el.querySelector('#nl-log-box');
       replyCharCounter = el.querySelector('#nl-char-counter');
+      sceneBadge       = el.querySelector('#nl-scene-badge');
 
-      makeDraggable(el, el.querySelector('#nl-header'));
+      // 关键改动：主卡片头与胶囊均支持拖拽，并提供防误触状态返回
+      const dragTracker = makeDraggable(el, [el.querySelector('#nl-header'), miniCapsuleEl]);
 
-      el.querySelector('#nl-btn-collapse').addEventListener('click', () => {
+      // 关键改动：卡片向右下角收缩折叠
+      function collapsePanel() {
+        if (collapsed) return;
+        const cardRect = cardEl.getBoundingClientRect();
+        const cardRight = cardRect.right;
+        const cardBottom = cardRect.bottom;
+
         collapsed = true;
         CFG.panelCollapsed = true;
         el.classList.add('is-collapsed');
-      });
-      miniCapsuleEl.addEventListener('click', (e) => {
-        if (e.target.id === 'nl-capsule-toggle') return;
+
+        // 以卡片右下角为基准，将胶囊定位在该处
+        const capsuleRect = miniCapsuleEl.getBoundingClientRect();
+        const w = capsuleRect.width || 230;
+        const h = capsuleRect.height || 34;
+
+        let nextLeft = cardRight - w;
+        let nextTop = cardBottom - h;
+
+        nextLeft = Math.max(10, Math.min(window.innerWidth - w - 10, nextLeft));
+        nextTop = Math.max(10, Math.min(window.innerHeight - h - 10, nextTop));
+
+        el.style.right = 'auto';
+        el.style.bottom = 'auto';
+        el.style.left = `${nextLeft}px`;
+        el.style.top = `${nextTop}px`;
+      }
+
+      // 关键改动：从胶囊右下角向上、向左展开卡片，支持指定 Tab
+      function expandPanel(targetTab = null) {
+        if (!collapsed && !targetTab) return;
+        const capsuleRect = miniCapsuleEl.getBoundingClientRect();
+        const capsuleRight = capsuleRect.right;
+        const capsuleBottom = capsuleRect.bottom;
+
         collapsed = false;
         CFG.panelCollapsed = false;
         el.classList.remove('is-collapsed');
+
+        if (targetTab) {
+          switchTab(targetTab);
+        }
+
+        const cardRect = cardEl.getBoundingClientRect();
+        const w = cardRect.width || 338;
+        const h = cardRect.height || 420;
+
+        let nextLeft = capsuleRight - w;
+        let nextTop = capsuleBottom - h;
+
+        nextLeft = Math.max(10, Math.min(window.innerWidth - w - 10, nextLeft));
+        nextTop = Math.max(10, Math.min(window.innerHeight - h - 10, nextTop));
+
+        el.style.right = 'auto';
+        el.style.bottom = 'auto';
+        el.style.left = `${nextLeft}px`;
+        el.style.top = `${nextTop}px`;
+      }
+
+      function switchTab(tab) {
+        CFG.activeTab = tab;
+        el.querySelectorAll('.nl-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+        el.querySelectorAll('.nl-tab-content').forEach(c => c.classList.toggle('active', c.id === `nl-tab-${tab}`));
+        if (tab === 'cfg') renderRequestLogs();
+        if (tab === 'growth') refreshGrowthMetrics();
+      }
+
+      el.querySelector('#nl-btn-collapse').addEventListener('click', collapsePanel);
+
+      // 胶囊点击：非按钮且非拖拽时展开
+      miniCapsuleEl.addEventListener('click', (e) => {
+        if (dragTracker.wasDragged()) return;
+        if (e.target.closest('button')) return;
+        expandPanel();
       });
 
+      // 胶囊内按钮 1：快捷暂停/恢复
       el.querySelector('#nl-capsule-toggle').addEventListener('click', (e) => {
         e.stopPropagation();
         scroller.togglePause();
         updatePauseBtn();
       });
 
+      // 胶囊内按钮 2：快捷下一篇
+      el.querySelector('#nl-capsule-skip').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        replyStatusPinned = false;
+        scroller.stop();
+        panel.setStatus('正在挑选下一篇...');
+        const url = await getNextTopicUrl();
+        if (url) { navigateSpa(url); }
+        else { panel.setStatus('未找到下一篇'); }
+      });
+
+      // 胶囊内按钮 3：快捷直达成长 TL 看板
+      el.querySelector('#nl-capsule-growth').addEventListener('click', (e) => {
+        e.stopPropagation();
+        expandPanel('growth');
+      });
+
       el.querySelectorAll('.nl-tab-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-          const tab = btn.dataset.tab;
-          CFG.activeTab = tab;
-          el.querySelectorAll('.nl-tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
-          el.querySelectorAll('.nl-tab-content').forEach(c => c.classList.toggle('active', c.id === `nl-tab-${tab}`));
-          if (tab === 'cfg') renderRequestLogs();
-          if (tab === 'growth') refreshGrowthMetrics();
-        });
+        btn.addEventListener('click', () => switchTab(btn.dataset.tab));
       });
 
       el.querySelector('#nl-growth-refresh').addEventListener('click', () => refreshGrowthMetrics());
@@ -1567,6 +1702,10 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
 
         try {
           const result = await AIReplyEngine.generateReply();
+          if (sceneBadge && result.scene) {
+            sceneBadge.textContent = `${result.scene.icon} 场景: ${result.scene.label} · 说人话模式已生效`;
+          }
+
           if (result.rawCandidates.length === 0) {
             renderCandidateNotice('模型有返回但未解析出候选，请在「设置」中查看详情');
             setStatus('未识别出有效候选', true);
@@ -1576,7 +1715,7 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
 
           renderReplyCandidates(result.validCandidates.length > 0 ? result.validCandidates : result.rawCandidates);
           genBtn.textContent = '🔄 换一组';
-          setStatus(`已生成 ${result.rawCandidates.length} 条候选，点击选用即可发送`, true);
+          setStatus(`已生成 ${result.validCandidates.length} 条说人话候选，选用即可发送`, true);
         } catch (err) {
           renderCandidateNotice(`生成失败: ${err.message}`);
           setStatus(`生成失败: ${err.message}`, true);
@@ -1610,8 +1749,8 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
         const len = ReplyPipeline.getVisibleLength(replyTextarea.value);
         sendBtn.disabled = len === 0;
         if (replyCharCounter) {
-          replyCharCounter.textContent = `当前: ${len} 字 (建议 8~35 字)`;
-          replyCharCounter.style.color = (len >= 8 && len <= 35) ? 'var(--nl-success)' : 'var(--nl-text-muted)';
+          replyCharCounter.textContent = `当前: ${len} 字 (建议 8~30 字)`;
+          replyCharCounter.style.color = (len >= 8 && len <= 30) ? 'var(--nl-success)' : 'var(--nl-text-muted)';
         }
       });
 
@@ -1629,11 +1768,12 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
           const status = entry.result?.status || 'pending';
           item.innerHTML = `
             <div class="nl-log-meta">
-              <span>${entry.createdAt || '未知'} · ${status}</span>
+              <span>${entry.createdAt || '未知'} · [${entry.request?.scene || '通用'}] ${status}</span>
               <a class="nl-log-copy" style="color:var(--nl-primary); cursor:pointer">复制</a>
             </div>
             <pre class="nl-log-content">${JSON.stringify({
               model: entry.request?.model,
+              scene: entry.request?.scene,
               reply: entry.result?.rawReply || entry.result?.error
             }, null, 2)}</pre>
           `;
@@ -1679,8 +1819,8 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
             sendBtn.disabled = false;
             const len = ReplyPipeline.getVisibleLength(cand);
             if (replyCharCounter) {
-              replyCharCounter.textContent = `当前: ${len} 字 (建议 8~35 字)`;
-              replyCharCounter.style.color = (len >= 8 && len <= 35) ? 'var(--nl-success)' : 'var(--nl-text-muted)';
+              replyCharCounter.textContent = `当前: ${len} 字 (建议 8~30 字)`;
+              replyCharCounter.style.color = (len >= 8 && len <= 30) ? 'var(--nl-success)' : 'var(--nl-text-muted)';
             }
             setStatus('已选用候选，微调后即可发送', true);
           });
@@ -1711,6 +1851,7 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       const content = el?.querySelector('#nl-growth-content');
       const timeEl = el?.querySelector('#nl-growth-time');
       const tabBadge = el?.querySelector('#nl-growth-tab-badge');
+      const capsuleBadge = el?.querySelector('#nl-capsule-tl-badge');
       const growthState = GrowthMetrics.getState();
       if (!content) return;
 
@@ -1725,9 +1866,9 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       }
 
       const data = growthState.data;
-      if (tabBadge && data.currentLevel) {
-        tabBadge.textContent = getCleanBadgeName(data.currentLevel);
-      }
+      const cleanName = getCleanBadgeName(data.currentLevel);
+      if (tabBadge && cleanName) tabBadge.textContent = cleanName;
+      if (capsuleBadge && cleanName) capsuleBadge.textContent = cleanName;
 
       const headCard = document.createElement('div');
       headCard.className = 'nl-growth-head-card';
@@ -1804,32 +1945,68 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       }
     }
 
-    function makeDraggable(container, handle) {
-      let isDragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
-      handle.addEventListener('mousedown', e => {
-        if (e.target.tagName === 'BUTTON') return;
-        isDragging = true;
-        startX = e.clientX;
-        startY = e.clientY;
-        const rect = container.getBoundingClientRect();
-        startLeft = rect.left;
-        startTop = rect.top;
-        container.style.right = 'auto';
-        container.style.bottom = 'auto';
-        container.style.left = `${startLeft}px`;
-        container.style.top = `${startTop}px`;
-        e.preventDefault();
+    // 关键改动：支持多个手柄（卡片头部 + 胶囊），内置微小位移判断防止误判为拖拽
+    function makeDraggable(container, handles) {
+      let isDragging = false;
+      let startX = 0, startY = 0;
+      let startLeft = 0, startTop = 0;
+      let didDrag = false;
+      let wasJustDragged = false;
+
+      const handleList = Array.isArray(handles) ? handles : [handles];
+
+      handleList.forEach(handle => {
+        if (!handle) return;
+        handle.addEventListener('mousedown', e => {
+          if (e.target.closest('button') || e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+          isDragging = true;
+          didDrag = false;
+          startX = e.clientX;
+          startY = e.clientY;
+
+          const rect = container.getBoundingClientRect();
+          startLeft = rect.left;
+          startTop = rect.top;
+
+          container.style.right = 'auto';
+          container.style.bottom = 'auto';
+          container.style.left = `${startLeft}px`;
+          container.style.top = `${startTop}px`;
+          e.preventDefault();
+        });
       });
 
       window.addEventListener('mousemove', e => {
         if (!isDragging) return;
-        const nextLeft = Math.max(10, Math.min(window.innerWidth - 350, startLeft + (e.clientX - startX)));
-        const nextTop = Math.max(10, Math.min(window.innerHeight - 80, startTop + (e.clientY - startY)));
+        const dx = e.clientX - startX;
+        const dy = e.clientY - startY;
+        if (!didDrag && (Math.abs(dx) > 3 || Math.abs(dy) > 3)) {
+          didDrag = true;
+        }
+        if (!didDrag) return;
+
+        const maxW = container.offsetWidth || 230;
+        const maxH = container.offsetHeight || 40;
+        const nextLeft = Math.max(10, Math.min(window.innerWidth - maxW - 10, startLeft + dx));
+        const nextTop = Math.max(10, Math.min(window.innerHeight - maxH - 10, startTop + dy));
+
         container.style.left = `${nextLeft}px`;
         container.style.top = `${nextTop}px`;
       });
 
-      window.addEventListener('mouseup', () => { isDragging = false; });
+      window.addEventListener('mouseup', () => {
+        if (isDragging) {
+          isDragging = false;
+          if (didDrag) {
+            wasJustDragged = true;
+            setTimeout(() => { wasJustDragged = false; }, 120);
+          }
+        }
+      });
+
+      return {
+        wasDragged: () => wasJustDragged
+      };
     }
 
     function bindSlider(inputSel, valSel, onChange) {
@@ -1896,7 +2073,7 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
   })();
 
   // ============================================================
-  // AutoScroller 实例与事件监听
+  // AutoScroller 实例与路由事件监听
   // ============================================================
   const scroller = new AutoScroller();
   let currentPath = window.location.pathname;
@@ -1930,7 +2107,7 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
     _mut = setTimeout(() => { _mut = null; handleRouteChange(); }, 300);
   }).observe(document.body, { childList: true, subtree: true });
 
-  // 快捷键
+  // 键盘快捷键
   document.addEventListener('keydown', e => {
     if (['INPUT','TEXTAREA'].includes(e.target.tagName) || e.target.isContentEditable) return;
     if (e.key === 'p' || e.key === 'P') {
@@ -1943,7 +2120,7 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
     }
   });
 
-  // 初始化
+  // 初始化入口
   function init() {
     panel.build();
     if (isTopicPage()) {

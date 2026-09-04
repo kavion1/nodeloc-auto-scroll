@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         NodeLoc Auto Scroll & Evidence-Grounded Replier (v21.7.0 - JSON接口直读版)
+// @name         NodeLoc Auto Scroll & Evidence-Grounded Replier (v21.7.1 - 接口防卡死与UI精调版)
 // @namespace    http://tampermonkey.net/
-// @version      21.7.0
-// @description  成长指标改用官方 upgrade-progress.json 接口直连获取，彻底告别 DOM 模拟与菜单闪烁；支持自主配置账号与自动感知；延续胶囊全能交互与说人话引擎。
+// @version      21.7.1
+// @description  升级成长看板：解决接口读取卡死与UI错位；GM_xhr与fetch双通道直读upgrade-progress.json；防异常崩盘兜底与页面DOM降级采集；全控件高精度垂直居中排版。
 // @author       AutoScroll & shuorenhua
 // @match        https://www.nodeloc.com/*
 // @grant        GM_setValue
@@ -203,10 +203,31 @@
   }
 
   // ============================================================
-  // 成长指标模块（全新升级：官方 upgrade-progress.json 直读）
+  // 成长指标模块（官方 JSON 直连 + 健壮解析 + 页面 DOM 降级）
   // ============================================================
   const GrowthMetrics = (() => {
-    const state = { data: null, updatedAt: null, loading: false, error: '' };
+    const state = { data: null, updatedAt: null, loading: false, error: '', source: '' };
+
+    const TL_NAMES = {
+      0: '萌新 (TL0)',
+      1: '青铜 (TL1)',
+      2: '白银 (TL2)',
+      3: '黄金 (TL3)',
+      4: '钻石 (TL4)',
+      5: '王者 (TL5)'
+    };
+
+    function formatLevel(lvl, fallback) {
+      if (lvl === undefined || lvl === null || lvl === '') return fallback;
+      if (typeof lvl === 'number' || /^\d+$/.test(String(lvl).trim())) {
+        const num = Number(lvl);
+        return TL_NAMES[num] || `TL${num}`;
+      }
+      if (typeof lvl === 'object') {
+        return lvl.name || lvl.title || lvl.label || formatLevel(lvl.level ?? lvl.id, fallback);
+      }
+      return String(lvl);
+    }
 
     const metricMeta = {
       '阅读时长（分钟）': { key: 'readTime', label: '阅读时长', unit: '分钟', icon: '⏱️' },
@@ -242,47 +263,63 @@
     function parseUpgradeProgressJson(json) {
       if (!json || typeof json !== 'object') throw new Error('接口返回格式异常');
 
-      const raw = json.upgrade_progress || json.data || json;
-
-      // 提取等级信息
-      let currentLevel = raw.current_level || raw.currentLevel || raw.current_trust_level || '当前等级';
-      let nextLevel = raw.next_level || raw.nextLevel || raw.target_level || '下一等级';
-      if (Array.isArray(raw.levels) && raw.levels.length >= 2) {
-        currentLevel = raw.levels[0];
-        nextLevel = raw.levels[1];
+      if (Array.isArray(json.errors) && json.errors.length > 0) {
+        throw new Error(json.errors[0]);
+      }
+      if (json.error) {
+        throw new Error(typeof json.error === 'string' ? json.error : (json.error.message || '接口返回错误'));
       }
 
+      const raw = json.upgrade_progress || json.data || json;
+
+      // 提取等级信息 (严格安全转换，防止数值/对象导致调用字符串方法报错)
+      let currentLevel = '当前等级';
+      let nextLevel = '下一等级';
+
+      if (raw.current_level !== undefined) currentLevel = formatLevel(raw.current_level, '当前等级');
+      else if (raw.currentLevel !== undefined) currentLevel = formatLevel(raw.currentLevel, '当前等级');
+      else if (raw.current_trust_level !== undefined) currentLevel = formatLevel(raw.current_trust_level, '当前等级');
+      else if (Array.isArray(raw.levels) && raw.levels.length > 0) currentLevel = formatLevel(raw.levels[0], '当前等级');
+
+      if (raw.next_level !== undefined) nextLevel = formatLevel(raw.next_level, '下一等级');
+      else if (raw.nextLevel !== undefined) nextLevel = formatLevel(raw.nextLevel, '下一等级');
+      else if (raw.target_level !== undefined) nextLevel = formatLevel(raw.target_level, '下一等级');
+      else if (Array.isArray(raw.levels) && raw.levels.length > 1) nextLevel = formatLevel(raw.levels[1], '下一等级');
+
       // 提取指标项
-      const rawMetrics = Array.isArray(raw.metrics) ? raw.metrics
-        : Array.isArray(raw.requirements) ? raw.requirements
-        : Array.isArray(raw.cards) ? raw.cards
-        : Array.isArray(raw.items) ? raw.items
-        : (raw.requirements && typeof raw.requirements === 'object') ? Object.values(raw.requirements)
-        : [];
+      let rawMetrics = [];
+      if (Array.isArray(raw.metrics)) rawMetrics = raw.metrics;
+      else if (Array.isArray(raw.requirements)) rawMetrics = raw.requirements;
+      else if (Array.isArray(raw.cards)) rawMetrics = raw.cards;
+      else if (Array.isArray(raw.items)) rawMetrics = raw.items;
+      else if (raw.requirements && typeof raw.requirements === 'object') rawMetrics = Object.values(raw.requirements);
+      else if (raw.metrics && typeof raw.metrics === 'object') rawMetrics = Object.values(raw.metrics);
+      else if (Array.isArray(raw.progress)) rawMetrics = raw.progress;
 
       const metrics = rawMetrics.map(item => {
-        const rawLabel = String(item.label || item.name || item.title || item.key || item.id || '').trim();
-        const meta = metricMeta[rawLabel] || metricMeta[item.key] || {
-          key: item.key || rawLabel,
-          label: rawLabel || '未知指标',
+        if (!item || typeof item !== 'object') return null;
+        const rawLabel = String(item.label || item.name || item.title || item.key || item.id || item.desc || '').trim();
+        const meta = metricMeta[rawLabel] || metricMeta[item.key] || metricMeta[item.id] || {
+          key: item.key || item.id || rawLabel,
+          label: rawLabel || '指标项',
           unit: item.unit || '',
           icon: '📌'
         };
 
-        const value = toNumber(item.value ?? item.current ?? item.count);
-        const target = toNumber(item.target ?? item.required ?? item.max);
+        const value = toNumber(item.value ?? item.current ?? item.count ?? item.actual);
+        const target = toNumber(item.target ?? item.required ?? item.max ?? item.need ?? item.threshold);
         let progress = item.progress !== undefined ? toNumber(item.progress)
-          : (target > 0 ? Math.min(100, Math.round((value / target) * 100)) : 100);
+          : (target > 0 ? Math.min(100, Math.round((value / target) * 100)) : (value > 0 ? 100 : 0));
 
-        const reached = Boolean(item.reached ?? item.met ?? item.is_met ?? (target > 0 && value >= target));
+        const reached = Boolean(item.reached ?? item.met ?? item.is_met ?? item.satisfied ?? (target > 0 && value >= target));
         return { ...meta, value, target, progress, reached };
-      }).filter(m => m.label && m.target > 0);
+      }).filter(Boolean);
 
       // 统计满足情况
-      const satisfiedCount = raw.satisfied_count ?? raw.satisfiedCount ?? raw.met_count
-        ?? metrics.filter(m => m.reached).length;
-      const unmetCount = raw.unmet_count ?? raw.unmetCount ?? raw.unmet
-        ?? (metrics.length > 0 ? metrics.filter(m => !m.reached).length : 0);
+      const satisfiedCount = toNumber(raw.satisfied_count ?? raw.satisfiedCount ?? raw.met_count ?? raw.satisfied)
+        || metrics.filter(m => m.reached).length;
+      const unmetCount = toNumber(raw.unmet_count ?? raw.unmetCount ?? raw.unmet)
+        || (metrics.length > 0 ? metrics.filter(m => !m.reached).length : 0);
 
       let overallPercent = raw.overall_percent ?? raw.overallPercent ?? raw.percentage ?? raw.gauge_value;
       if (overallPercent === undefined || overallPercent === null) {
@@ -290,7 +327,10 @@
       }
       overallPercent = Math.min(100, Math.max(0, toNumber(overallPercent)));
 
-      const accountStatus = raw.account_status || raw.accountStatus || raw.status || '未被禁言或封禁';
+      let accountStatus = '正常活跃';
+      if (raw.account_status) accountStatus = String(raw.account_status);
+      else if (raw.accountStatus) accountStatus = String(raw.accountStatus);
+      else if (raw.status) accountStatus = String(raw.status);
 
       return {
         overallPercent,
@@ -303,11 +343,157 @@
       };
     }
 
-    async function refresh(targetUsername = null) {
+    // 官方面板 DOM 抓取降级实现（备用通道，万一接口403时可一键抓取）
+    async function waitForPanel() {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 3000) {
+        const panel = document.querySelector('.upgrade-progress-panel');
+        if (panel) return panel;
+        await new Promise(resolve => WorkerTimer.setTimeout(resolve, 80));
+      }
+      return null;
+    }
+
+    async function openOfficialPanel() {
+      const existing = document.querySelector('.upgrade-progress-panel');
+      if (existing) return waitForPanel();
+
+      const userMenuButton = document.querySelector('button[aria-label="通知和帐户"]') ||
+                             document.querySelector('#current-user') ||
+                             document.querySelector('.current-user');
+      if (!userMenuButton) throw new Error('未检测到登录账户或菜单按钮');
+      userMenuButton.click();
+
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 2000) {
+        const upgradeTab = Array.from(document.querySelectorAll('[role="tab"]'))
+          .find(item => item.getAttribute('aria-label') === '升级进度' || item.textContent.trim().includes('升级进度'));
+        if (upgradeTab) {
+          upgradeTab.click();
+          return waitForPanel();
+        }
+        await new Promise(resolve => WorkerTimer.setTimeout(resolve, 80));
+      }
+      throw new Error('未找到“升级进度”入口');
+    }
+
+    function closeOfficialMenu() {
+      try {
+        const userMenu = document.querySelector('.user-menu, .menu-panel.drop-down');
+        if (userMenu) {
+          document.body.click();
+        }
+      } catch (e) {}
+    }
+
+    function parseOfficialPanel(officialPanel) {
+      const panelText = officialPanel.innerText.replace(/\s+/g, ' ').trim();
+      const levels = Array.from(officialPanel.querySelectorAll('.upgrade-progress-panel__level'))
+        .map(item => item.textContent.trim());
+      const satisfiedMatch = panelText.match(/(\d+)\s*已满足条件/);
+      const unmetMatch = panelText.match(/(\d+)\s*未满足条件/);
+      const accountMatch = panelText.match(/账号状态\s+(.+?)\s+当前\s+社区活跃度/);
+
+      const metrics = Array.from(officialPanel.querySelectorAll('.upgrade-progress-panel__card'))
+        .map(card => {
+          const rawLabel = card.querySelector('.upgrade-progress-panel__card-label')?.textContent.trim() || '';
+          const meta = metricMeta[rawLabel] || { key: 'unknown', label: rawLabel, unit: '', icon: '📌' };
+          const value = toNumber(card.querySelector('.upgrade-progress-panel__card-value')?.textContent);
+          const target = toNumber(card.querySelector('.upgrade-progress-panel__card-target')?.textContent);
+          const progress = Math.min(100, toNumber(card.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')));
+          const reached = card.classList.contains('--met') || (target > 0 && value >= target);
+          return { ...meta, value, target, progress, reached };
+        })
+        .filter(m => m.label);
+
+      if (metrics.length === 0) throw new Error('未能提取到活跃度卡片');
+
+      return {
+        overallPercent: toNumber(officialPanel.querySelector('.upgrade-progress-panel__gauge-value')?.textContent),
+        currentLevel: levels[0] || '当前等级',
+        nextLevel: levels[1] || '下一等级',
+        satisfiedCount: toNumber(satisfiedMatch?.[1]),
+        unmetCount: toNumber(unmetMatch?.[1]),
+        accountStatus: accountMatch?.[1] || '正常活跃',
+        metrics
+      };
+    }
+
+    // 双通道网络直连：GM_xmlhttpRequest 优先（防沙箱与跨域Cookie问题，自带10s超时），fetch为降级通道
+    async function fetchUpgradeProgressJson(username) {
+      const url = `https://www.nodeloc.com/u/${encodeURIComponent(username)}/upgrade-progress.json`;
+      const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content
+        || window.Discourse?.csrfToken
+        || '';
+
+      // 1. GM_xmlhttpRequest
+      if (typeof GM_xmlhttpRequest === 'function') {
+        try {
+          const res = await new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+              method: 'GET',
+              url: url,
+              timeout: 10000,
+              headers: {
+                'Accept': 'application/json',
+                'X-Requested-With': 'XMLHttpRequest',
+                ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {})
+              },
+              onload: r => resolve(r),
+              onerror: err => reject(new Error(err?.statusText || 'GM_xhr 网络连接失败')),
+              ontimeout: () => reject(new Error('请求超时 (10秒)'))
+            });
+          });
+
+          if (res.status === 200) {
+            let parsed = null;
+            try { parsed = JSON.parse(res.responseText); } catch (e) { throw new Error('返回内容非有效 JSON'); }
+            return parsed;
+          }
+          if (res.status === 403) throw new Error('403 无权限：请确认已在浏览器中登录 NodeLoc');
+          if (res.status === 404) throw new Error(`404 未找到账号 [${username}] 的升级进度，请核对用户名`);
+          throw new Error(`HTTP ${res.status}: 请求失败`);
+        } catch (gmErr) {
+          console.warn('[NodeLoc] GM_xmlhttpRequest 请求失败，尝试 fetch 降级:', gmErr);
+          // 若为明确的403/404错误，直接抛出供展示
+          if (gmErr.message?.includes('403') || gmErr.message?.includes('404')) {
+            throw gmErr;
+          }
+        }
+      }
+
+      // 2. 原生 fetch 降级（带 10s AbortController 超时保护）
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10000);
+      try {
+        const res = await fetch(url, {
+          signal: controller.signal,
+          credentials: 'same-origin',
+          headers: {
+            'Accept': 'application/json',
+            'X-Requested-With': 'XMLHttpRequest',
+            ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {})
+          }
+        });
+        clearTimeout(timer);
+        if (!res.ok) {
+          if (res.status === 403) throw new Error('403 无权限：请确认已在浏览器中登录 NodeLoc');
+          if (res.status === 404) throw new Error(`404 未找到账号 [${username}] 的升级进度，请核对用户名`);
+          throw new Error(`HTTP ${res.status}: 获取失败`);
+        }
+        return await res.json();
+      } catch (err) {
+        clearTimeout(timer);
+        if (err.name === 'AbortError') throw new Error('请求超时 (10秒)');
+        throw err;
+      }
+    }
+
+    async function refresh(targetUsername = null, forceDom = false) {
       if (state.loading) return state;
 
       let username = (targetUsername || CFG.username || detectCurrentUsername()).trim();
-      if (!username) {
+      if (!username && !forceDom) {
         state.error = '请先配置 NodeLoc 用户名';
         return state;
       }
@@ -318,25 +504,29 @@
       state.loading = true;
       state.error = '';
 
-      try {
-        const url = `/u/${encodeURIComponent(username)}/upgrade-progress.json`;
-        const res = await fetch(url, {
-          credentials: 'same-origin',
-          headers: {
-            'Accept': 'application/json',
-            'X-Requested-With': 'XMLHttpRequest'
-          }
-        });
-
-        if (!res.ok) {
-          if (res.status === 404) throw new Error(`未找到账号 [${username}] 的升级进度，请核对用户名`);
-          if (res.status === 403) throw new Error(`无权限访问（HTTP 403），请确认是否已在浏览器中登录 NodeLoc`);
-          throw new Error(`获取失败: HTTP ${res.status}`);
+      // 模式 1: 强制从 DOM 采集
+      if (forceDom) {
+        try {
+          const officialPanel = await openOfficialPanel();
+          if (!officialPanel) throw new Error('官方升级面板加载超时');
+          state.data = parseOfficialPanel(officialPanel);
+          state.updatedAt = new Date();
+          state.source = 'DOM抓取';
+        } catch (err) {
+          state.error = err.message || 'DOM采集异常';
+        } finally {
+          state.loading = false;
+          closeOfficialMenu();
         }
+        return state;
+      }
 
-        const json = await res.json();
+      // 模式 2: 官方 JSON API 直连读取
+      try {
+        const json = await fetchUpgradeProgressJson(username);
         state.data = parseUpgradeProgressJson(json);
         state.updatedAt = new Date();
+        state.source = 'JSON直读';
       } catch (err) {
         state.error = err.message || '成长指标获取异常';
       } finally {
@@ -345,7 +535,11 @@
       return state;
     }
 
-    return { getState: () => state, refresh };
+    return {
+      getState: () => state,
+      setLoading: (v) => { state.loading = Boolean(v); },
+      refresh
+    };
   })();
 
   function isTopicPage() { return /^\/t\/[^/]+\/\d+/.test(window.location.pathname); }
@@ -1315,6 +1509,56 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
         background: var(--nl-surface); border: 1px dashed var(--nl-surface-border); line-height: 1.4;
       }
 
+      /* 成长看板专属高精度布局与UI组件 */
+      .nl-growth-account-bar {
+        display: flex; align-items: center; gap: 6px;
+        background: var(--nl-surface); padding: 5px 8px; border-radius: 8px;
+        border: 1px solid var(--nl-surface-border); box-sizing: border-box;
+      }
+      .nl-account-label {
+        font-size: 11px; font-weight: 600; color: var(--nl-text-muted);
+        white-space: nowrap; flex-shrink: 0; display: flex; align-items: center; gap: 2px;
+      }
+      .nl-input-account {
+        flex: 1; min-width: 0; height: 26px; padding: 0 8px;
+        border: 1px solid var(--nl-surface-border); border-radius: 6px;
+        font-size: 11px; outline: none; background: var(--nl-bg); color: var(--nl-text);
+        box-sizing: border-box;
+      }
+      .nl-input-account:focus { border-color: var(--nl-primary); box-shadow: 0 0 0 2px var(--nl-primary-light); }
+      .nl-btn-save-account {
+        flex-shrink: 0; height: 26px; padding: 0 9px; border-radius: 6px;
+        border: 1px solid var(--nl-primary); background: var(--nl-primary-light);
+        color: var(--nl-primary); font-size: 10.5px; font-weight: 600; cursor: pointer;
+        display: inline-flex; align-items: center; justify-content: center; transition: 0.15s;
+        box-sizing: border-box; white-space: nowrap;
+      }
+      .nl-btn-save-account:hover { background: var(--nl-primary); color: #fff; }
+
+      #nl-growth-content {
+        display: flex; flex-direction: column; gap: 8px; min-height: 85px;
+      }
+
+      .nl-spinner {
+        width: 14px; height: 14px; border: 2px solid var(--nl-surface-border);
+        border-top-color: var(--nl-primary); border-radius: 50%;
+        animation: nl-spin 0.75s linear infinite; display: inline-block; flex-shrink: 0;
+      }
+      @keyframes nl-spin { to { transform: rotate(360deg); } }
+
+      .nl-growth-loading-box {
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        gap: 6px; padding: 22px 10px; background: var(--nl-surface);
+        border-radius: 10px; border: 1px dashed var(--nl-surface-border); text-align: center;
+      }
+      .nl-growth-msg-box {
+        display: flex; flex-direction: column; gap: 6px; padding: 12px 10px;
+        background: var(--nl-surface); border-radius: 10px; border: 1px solid var(--nl-surface-border);
+        text-align: center;
+      }
+      .nl-growth-msg-box.error { border-color: rgba(245, 158, 11, 0.4); background: rgba(245, 158, 11, 0.05); }
+      .nl-growth-msg-box.hint { border-color: var(--nl-surface-border); }
+
       .nl-growth-head-card {
         padding: 8px 10px; border-radius: 10px; background: var(--nl-surface);
         border: 1px solid var(--nl-surface-border); display: flex; align-items: center; gap: 10px;
@@ -1326,8 +1570,8 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       .nl-gauge-text { position: absolute; font-size: 13px; font-weight: 800; color: var(--nl-text); }
       .nl-gauge-text small { font-size: 9px; font-weight: 600; }
 
-      .nl-growth-head-info { display: flex; flex-direction: column; gap: 3px; flex: 1; }
-      .nl-level-badge-row { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+      .nl-growth-head-info { display: flex; flex-direction: column; gap: 3px; flex: 1; min-width: 0; }
+      .nl-level-badge-row { display: flex; align-items: center; gap: 5px; white-space: nowrap; flex-wrap: wrap; }
       .nl-level-pill {
         padding: 2px 7px; border-radius: 5px; font-size: 11px; font-weight: 700;
         background: var(--nl-surface-border); color: var(--nl-text); white-space: nowrap;
@@ -1354,12 +1598,19 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       .nl-card-bar-fill { height: 100%; background: var(--nl-accent); border-radius: 2px; transition: width 0.4s ease; }
       .nl-growth-card.reached .nl-card-bar-fill { background: var(--nl-success); }
 
+      .nl-growth-footer {
+        display: flex; justify-content: space-between; align-items: center;
+        padding-top: 6px; border-top: 1px solid var(--nl-surface-border); margin-top: 2px;
+      }
+
       .nl-btn-sm {
         padding: 3px 8px; border-radius: 6px; border: 1px solid var(--nl-surface-border);
         background: var(--nl-surface); color: var(--nl-text); font-size: 10px; font-weight: 600;
         cursor: pointer; white-space: nowrap; line-height: 1.2; flex-shrink: 0;
       }
       .nl-btn-sm:hover { background: var(--nl-surface-hover); }
+      .nl-btn-sm.primary { border-color: var(--nl-primary); background: var(--nl-primary-light); color: var(--nl-primary); }
+      .nl-btn-sm.primary:hover { background: var(--nl-primary); color: #fff; }
 
       #nl-log-box { display: flex; flex-direction: column; gap: 5px; max-height: 200px; overflow-y: auto; }
       .nl-log-item { border: 1px solid var(--nl-surface-border); border-radius: 6px; padding: 6px; font-size: 10px; }
@@ -1394,7 +1645,7 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
           <div id="nl-header">
             <div id="nl-header-title">
               <span>📖 NodeLoc 助手</span>
-              <span id="nl-badge">v21.7.0 · JSON直读</span>
+              <span id="nl-badge">v21.7.1 · 接口全能版</span>
             </div>
             <button class="nl-icon-btn" id="nl-btn-collapse" title="折叠为微型胶囊">一</button>
           </div>
@@ -1498,20 +1749,20 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
               </div>
             </div>
 
-            <!-- TAB 2: 成长指标看板（官方 JSON 接口直读） -->
+            <!-- TAB 2: 成长指标看板（官方 JSON 接口直读 + 备用降级） -->
             <div class="nl-tab-content ${CFG.activeTab==='growth'?'active':''}" id="nl-tab-growth">
-              <!-- 用户名配置与切换栏 -->
-              <div style="display:flex; align-items:center; justify-content:space-between; gap:6px; background:var(--nl-surface); padding:5px 8px; border-radius:8px; border:1px solid var(--nl-surface-border);">
-                <div style="display:flex; align-items:center; gap:4px; font-size:11px; overflow:hidden;">
-                  <span style="color:var(--nl-text-muted); flex-shrink:0;">👤 账号:</span>
-                  <input class="nl-input" type="text" id="nl-growth-user-input" value="${CFG.username}" placeholder="输入用户名(如 1751140932)" style="height:24px; padding:0 6px; font-size:11px; flex:1; min-width:80px;">
-                </div>
-                <button class="nl-btn-sm" id="nl-growth-user-save" style="padding:2px 7px; font-size:10px;">保存账号</button>
+              <!-- 用户名配置与保存 -->
+              <div class="nl-growth-account-bar">
+                <span class="nl-account-label">👤 账号:</span>
+                <input class="nl-input nl-input-account" type="text" id="nl-growth-user-input" value="${CFG.username}" placeholder="输入用户名(如 1751140932)">
+                <button class="nl-btn-save-account" id="nl-growth-user-save">保存账号</button>
               </div>
 
+              <!-- 成长指标动态内容区 -->
               <div id="nl-growth-content"></div>
 
-              <div style="display:flex; justify-content:space-between; align-items:center; margin-top:2px;">
+              <!-- 底部状态与刷新栏 -->
+              <div class="nl-growth-footer">
                 <span id="nl-growth-time" style="font-size:10px; color:var(--nl-text-muted)">接口直读 · 0 闪烁</span>
                 <button class="nl-btn-sm" id="nl-growth-refresh">↻ 刷新指标</button>
               </div>
@@ -1702,6 +1953,8 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
         userSaveBtn.addEventListener('click', () => {
           const val = userInput.value.trim();
           syncUsername(val);
+          userSaveBtn.textContent = '✅ 已保存';
+          setTimeout(() => { userSaveBtn.textContent = '保存账号'; }, 1200);
           refreshGrowthMetrics();
         });
       }
@@ -1710,6 +1963,10 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
         userInput.addEventListener('keydown', (e) => {
           if (e.key === 'Enter') {
             syncUsername(userInput.value.trim());
+            if (userSaveBtn) {
+              userSaveBtn.textContent = '✅ 已保存';
+              setTimeout(() => { userSaveBtn.textContent = '保存账号'; }, 1200);
+            }
             refreshGrowthMetrics();
           }
         });
@@ -1930,12 +2187,13 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
 
     function getCleanBadgeName(lvl) {
       if (!lvl) return 'TL';
-      if (lvl.includes('青铜')) return '青铜';
-      if (lvl.includes('白银')) return '白银';
-      if (lvl.includes('黄金')) return '黄金';
-      if (lvl.includes('钻石')) return '钻石';
-      if (lvl.includes('王者')) return '王者';
-      return lvl.slice(0, 2);
+      const s = String(typeof lvl === 'object' ? (lvl.name || lvl.title || lvl.level || '') : (lvl ?? ''));
+      if (s.includes('青铜') || s === '1') return '青铜';
+      if (s.includes('白银') || s === '2') return '白银';
+      if (s.includes('黄金') || s === '3') return '黄金';
+      if (s.includes('钻石') || s === '4') return '钻石';
+      if (s.includes('王者') || s === '5') return '王者';
+      return s ? s.slice(0, 2) : 'TL';
     }
 
     function renderGrowthMetrics() {
@@ -1946,106 +2204,160 @@ ${ctx.allReplies.join('\n') || '（暂无其他回复，你是前排）'}
       const growthState = GrowthMetrics.getState();
       if (!content) return;
 
-      content.replaceChildren();
+      try {
+        content.replaceChildren();
 
-      // 用户名未配置提示
-      if (!CFG.username) {
-        content.innerHTML = `
-          <div class="nl-card-hint" style="text-align:center; padding:16px 8px; display:flex; flex-direction:column; gap:6px;">
-            <div style="font-weight:700; font-size:12px; color:var(--nl-text);">💡 请先填写你的 NodeLoc 用户名</div>
-            <div style="font-size:10px; color:var(--nl-text-muted);">直接通过官方 JSON 接口读取，0 闪烁、不弹菜单、速度极快</div>
-            <div style="font-size:10px; color:var(--nl-primary);">在上方输入框填入你的用户名（如 1751140932）并保存即可</div>
+        // 状态 1: 用户名未配置提示
+        if (!CFG.username) {
+          content.innerHTML = `
+            <div class="nl-growth-msg-box hint">
+              <div style="font-weight:700; font-size:12px; color:var(--nl-text);">💡 请先填写你的 NodeLoc 用户名</div>
+              <div style="font-size:10.5px; color:var(--nl-text-muted); line-height:1.4;">系统将直接通过官方 JSON 接口读取升级进度，0 闪烁、不弹菜单。</div>
+              <div style="font-size:10.5px; color:var(--nl-primary);">在上方输入你的用户名（如 1751140932）后点击「保存账号」即可。</div>
+            </div>
+          `;
+          return;
+        }
+
+        // 状态 2: 正在读取中（动效加载动画）
+        if (growthState.loading) {
+          content.innerHTML = `
+            <div class="nl-growth-loading-box">
+              <span class="nl-spinner"></span>
+              <div style="font-weight:600; font-size:11.5px; color:var(--nl-text);">正在获取官方升级进度数据...</div>
+              <div style="font-size:10px; color:var(--nl-text-muted);">官方接口直连 · 0 闪烁 · 毫秒级响应</div>
+            </div>
+          `;
+          return;
+        }
+
+        // 状态 3: 接口获取异常（提供重试与DOM抓取双按钮）
+        if (!growthState.data) {
+          const errText = growthState.error || '暂无成长指标，请点击刷新';
+          content.innerHTML = `
+            <div class="nl-growth-msg-box error">
+              <div style="font-weight:700; font-size:11.5px; color:var(--nl-accent);">⚠️ 成长指标获取异常</div>
+              <div style="font-size:10px; color:var(--nl-text-muted); line-height:1.4; word-break:break-all;">${errText}</div>
+              <div style="display:flex; gap:6px; margin-top:4px; justify-content:center;">
+                <button class="nl-btn-sm primary" id="nl-growth-retry-btn">↻ 重试接口直读</button>
+                <button class="nl-btn-sm" id="nl-growth-dom-btn">🔍 页面DOM采集</button>
+              </div>
+            </div>
+          `;
+          content.querySelector('#nl-growth-retry-btn')?.addEventListener('click', () => refreshGrowthMetrics(false));
+          content.querySelector('#nl-growth-dom-btn')?.addEventListener('click', () => refreshGrowthMetrics(true));
+          return;
+        }
+
+        // 状态 4: 读取成功渲染
+        const data = growthState.data;
+        const cleanName = getCleanBadgeName(data.currentLevel);
+        if (tabBadge && cleanName) tabBadge.textContent = cleanName;
+        if (capsuleBadge && cleanName) capsuleBadge.textContent = cleanName;
+
+        const headCard = document.createElement('div');
+        headCard.className = 'nl-growth-head-card';
+
+        const pct = Math.min(100, Math.max(0, Number(data.overallPercent) || 0));
+        const circumference = 2 * Math.PI * 23;
+        const offset = circumference - (pct / 100) * circumference;
+
+        headCard.innerHTML = `
+          <div class="nl-gauge-wrapper">
+            <svg class="nl-gauge-svg" viewBox="0 0 56 56">
+              <circle class="nl-gauge-bg" cx="28" cy="28" r="23"></circle>
+              <circle class="nl-gauge-bar" cx="28" cy="28" r="23" style="stroke-dasharray:${circumference}; stroke-dashoffset:${offset};"></circle>
+            </svg>
+            <div class="nl-gauge-text">${pct}<small>%</small></div>
+          </div>
+          <div class="nl-growth-head-info">
+            <div class="nl-level-badge-row">
+              <span class="nl-level-pill">${data.currentLevel || '当前等级'}</span>
+              <span style="color:var(--nl-text-muted); font-size:10px;">➔</span>
+              <span class="nl-level-pill target">${data.nextLevel || '下一等级'}</span>
+            </div>
+            <div style="font-size:10px; color:var(--nl-text-muted); margin-top:2px;">
+              达标: <b style="color:var(--nl-success)">${data.satisfiedCount ?? 0}</b> 项 · 待达成: <b style="color:var(--nl-accent)">${data.unmetCount ?? 0}</b> 项
+            </div>
+            <div class="nl-account-status">
+              <span>●</span> 账号状态: ${data.accountStatus || '正常活跃'}
+            </div>
           </div>
         `;
-        return;
-      }
 
-      if (growthState.loading) {
-        content.innerHTML = '<div style="text-align:center; padding:20px 0; color:var(--nl-text-muted); font-size:11px;">⏳ 正在通过官方 JSON 接口读取升级进度...</div>';
-        return;
-      }
-      if (!growthState.data) {
-        content.innerHTML = `<div style="text-align:center; padding:20px 0; color:var(--nl-text-muted); font-size:11px;">${growthState.error || '暂无成长指标，请点击刷新'}</div>`;
-        return;
-      }
+        const grid = document.createElement('div');
+        grid.className = 'nl-growth-grid';
 
-      const data = growthState.data;
-      const cleanName = getCleanBadgeName(data.currentLevel);
-      if (tabBadge && cleanName) tabBadge.textContent = cleanName;
-      if (capsuleBadge && cleanName) capsuleBadge.textContent = cleanName;
+        const metricsList = Array.isArray(data.metrics) ? data.metrics : [];
+        if (metricsList.length === 0) {
+          const emptyHint = document.createElement('div');
+          emptyHint.className = 'nl-card-hint';
+          emptyHint.style.gridColumn = 'span 2';
+          emptyHint.style.textAlign = 'center';
+          emptyHint.textContent = '当前等级暂无可展示的细分达标项';
+          grid.appendChild(emptyHint);
+        } else {
+          metricsList.forEach(m => {
+            const card = document.createElement('div');
+            card.className = `nl-growth-card${m.reached ? ' reached' : ''}`;
+            const diff = Math.max(0, (m.target || 0) - (m.value || 0));
+            const statusText = m.reached ? '✔ 已达标' : (m.target > 0 ? `差 ${diff}${m.unit || ''}` : '已记录');
 
-      const headCard = document.createElement('div');
-      headCard.className = 'nl-growth-head-card';
+            const prog = Math.min(100, Math.max(0, Number(m.progress) || (m.reached ? 100 : 0)));
+            const targetText = m.target > 0 ? `/ ${m.target}${m.unit ? ' ' + m.unit : ''}` : (m.unit || '');
 
-      const circumference = 2 * Math.PI * 23;
-      const offset = circumference - (Math.min(100, data.overallPercent) / 100) * circumference;
+            card.innerHTML = `
+              <div class="nl-card-top">
+                <span class="nl-card-title">${m.icon || '📌'} ${m.label}</span>
+                <span class="nl-card-status">${statusText}</span>
+              </div>
+              <div class="nl-card-nums">
+                ${m.value ?? 0} <small>${targetText}</small>
+              </div>
+              <div class="nl-card-bar-bg">
+                <div class="nl-card-bar-fill" style="width:${prog}%"></div>
+              </div>
+            `;
+            grid.appendChild(card);
+          });
+        }
 
-      headCard.innerHTML = `
-        <div class="nl-gauge-wrapper">
-          <svg class="nl-gauge-svg" viewBox="0 0 56 56">
-            <circle class="nl-gauge-bg" cx="28" cy="28" r="23"></circle>
-            <circle class="nl-gauge-bar" cx="28" cy="28" r="23" style="stroke-dasharray:${circumference}; stroke-dashoffset:${offset};"></circle>
-          </svg>
-          <div class="nl-gauge-text">${data.overallPercent}<small>%</small></div>
-        </div>
-        <div class="nl-growth-head-info">
-          <div class="nl-level-badge-row">
-            <span class="nl-level-pill">${data.currentLevel}</span>
-            <span style="color:var(--nl-text-muted)">➔</span>
-            <span class="nl-level-pill target">${data.nextLevel}</span>
-          </div>
-          <div style="font-size:10px; color:var(--nl-text-muted); margin-top:2px;">
-            达标: <b style="color:var(--nl-success)">${data.satisfiedCount}</b> 项 · 待达成: <b style="color:var(--nl-accent)">${data.unmetCount}</b> 项
-          </div>
-          <div class="nl-account-status">
-            <span>●</span> 账号状态: ${data.accountStatus}
-          </div>
-        </div>
-      `;
-
-      const grid = document.createElement('div');
-      grid.className = 'nl-growth-grid';
-
-      data.metrics.forEach(m => {
-        const card = document.createElement('div');
-        card.className = `nl-growth-card${m.reached ? ' reached' : ''}`;
-        const diff = Math.max(0, m.target - m.value);
-        const statusText = m.reached ? '✔ 已达标' : `差 ${diff}${m.unit}`;
-
-        card.innerHTML = `
-          <div class="nl-card-top">
-            <span class="nl-card-title">${m.icon || '📌'} ${m.label}</span>
-            <span class="nl-card-status">${statusText}</span>
-          </div>
-          <div class="nl-card-nums">
-            ${m.value} <small>/ ${m.target}${m.unit ? ' ' + m.unit : ''}</small>
-          </div>
-          <div class="nl-card-bar-bg">
-            <div class="nl-card-bar-fill" style="width:${Math.min(100, m.progress)}%"></div>
-          </div>
-        `;
-        grid.appendChild(card);
-      });
-
-      content.append(headCard, grid);
-      if (timeEl && growthState.updatedAt) {
-        timeEl.textContent = `已同步 [${CFG.username}]: ${growthState.updatedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}`;
+        content.append(headCard, grid);
+        if (timeEl) {
+          const srcTag = growthState.source ? `[${growthState.source}] ` : '';
+          const timeStr = growthState.updatedAt ? growthState.updatedAt.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '';
+          timeEl.textContent = `${srcTag}已同步 [${CFG.username}]: ${timeStr}`;
+        }
+      } catch (renderErr) {
+        console.error('[NodeLoc] renderGrowthMetrics 渲染捕获异常:', renderErr);
+        content.innerHTML = `<div class="nl-growth-msg-box error"><div style="color:var(--nl-accent); font-size:11px;">渲染看板异常: ${renderErr.message}</div></div>`;
       }
     }
 
-    async function refreshGrowthMetrics() {
+    async function refreshGrowthMetrics(forceDom = false) {
       const refreshBtn = el?.querySelector('#nl-growth-refresh');
       if (GrowthMetrics.getState().loading) return;
+
       if (refreshBtn) {
         refreshBtn.disabled = true;
         refreshBtn.textContent = '⏳ 读取中...';
       }
+
+      GrowthMetrics.setLoading(true);
       renderGrowthMetrics();
-      await GrowthMetrics.refresh();
-      renderGrowthMetrics();
-      if (refreshBtn) {
-        refreshBtn.disabled = false;
-        refreshBtn.textContent = '↻ 刷新指标';
+
+      try {
+        await GrowthMetrics.refresh(null, forceDom);
+      } catch (err) {
+        console.error('[NodeLoc] refreshGrowthMetrics 异常:', err);
+      } finally {
+        try {
+          renderGrowthMetrics();
+        } catch (e) {}
+        if (refreshBtn) {
+          refreshBtn.disabled = false;
+          refreshBtn.textContent = '↻ 刷新指标';
+        }
       }
     }
 
